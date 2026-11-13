@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -124,8 +125,8 @@ class Service:
     def _check_platform(self, job: dict[str, Any], platform: str) -> dict[str, Any]:
         self.jobs.log(
             job["id"],
-            "Starting the browser on the server."
-            if self.settings.headless
+            "Starting the browser on the server. The first time downloads Chromium and can take a few minutes."
+            if os.environ.get("RENDER") == "true" or self.settings.headless
             else "Chrome is opening. If X asks for a code or extra check, finish it in that window. The window stays open.",
             progress=20,
         )

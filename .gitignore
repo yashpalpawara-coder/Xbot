@@ -18,6 +18,7 @@ node_modules/
 *.tsbuildinfo
 
 backend/data/chrome-profile/
+backend/data/ms-playwright/
 backend/data/store.json
 backend/data/activity.json
 backend/data/daily_post.json

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import logging
+import os
 import re
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -111,6 +116,10 @@ class SessionState:
     detail: str = ""
 
 
+def _chromium_ready(path: Path) -> bool:
+    return any(path.glob("chromium-*/chrome-linux*/chrome"))
+
+
 class BrowserSession:
     """One persistent Chrome profile. The caller holds the process-wide browser lock."""
 
@@ -121,27 +130,53 @@ class BrowserSession:
         self.chatgpt_url = ""
         self.grok_url = ""
 
+    def _install_server_chromium(self) -> None:
+        """Render's build cache is empty at runtime, so Chromium has to live in the app directory."""
+        configured = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+        if configured and configured != "0" and _chromium_ready(Path(configured)):
+            return
+        target = self.settings.profile_path.parent / "ms-playwright"
+        target.mkdir(parents=True, exist_ok=True)
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(target)
+        if _chromium_ready(target):
+            return
+        logging.getLogger(__name__).info("Downloading Chromium into %s", target)
+        completed = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=False,
+            timeout=600,
+        )
+        if completed.returncode != 0 or not _chromium_ready(target):
+            raise RuntimeError("Chromium could not be downloaded on the server. The browser files are still missing.")
+
     def __enter__(self) -> BrowserSession:
+        on_render = os.environ.get("RENDER") == "true"
+        if on_render:
+            self._install_server_chromium()
         self.settings.profile_path.mkdir(parents=True, exist_ok=True)
         self._playwright = sync_playwright().start()
         options: dict[str, Any] = {
             "user_data_dir": str(self.settings.profile_path),
-            "headless": self.settings.headless,
+            "headless": True if on_render else self.settings.headless,
             "viewport": {"width": 1360, "height": 900},
             "locale": "en-US",
             "ignore_default_args": ["--enable-automation"],
             "args": ["--disable-blink-features=AutomationControlled"],
         }
         try:
-            try:
-                self.context = self._playwright.chromium.launch_persistent_context(channel="chrome", **options)
-            except Exception:
-                options["args"] = [
-                    *options["args"],
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ]
+            if on_render:
+                options["args"] = [*options["args"], "--no-sandbox", "--disable-dev-shm-usage"]
                 self.context = self._playwright.chromium.launch_persistent_context(**options)
+            else:
+                try:
+                    self.context = self._playwright.chromium.launch_persistent_context(channel="chrome", **options)
+                except Exception:
+                    options["args"] = [
+                        *options["args"],
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                    ]
+                    self.context = self._playwright.chromium.launch_persistent_context(**options)
         except Exception:
             self._playwright.stop()
             self._playwright = None
