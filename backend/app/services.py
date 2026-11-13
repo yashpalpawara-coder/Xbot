@@ -124,7 +124,9 @@ class Service:
     def _check_platform(self, job: dict[str, Any], platform: str) -> dict[str, Any]:
         self.jobs.log(
             job["id"],
-            "Chrome is opening. If X asks for a code or extra check, finish it in that window. The window stays open.",
+            "Starting the browser on the server."
+            if self.settings.headless
+            else "Chrome is opening. If X asks for a code or extra check, finish it in that window. The window stays open.",
             progress=20,
         )
         def notice(message: str) -> None:

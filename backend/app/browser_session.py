@@ -136,6 +136,11 @@ class BrowserSession:
             try:
                 self.context = self._playwright.chromium.launch_persistent_context(channel="chrome", **options)
             except Exception:
+                options["args"] = [
+                    *options["args"],
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                ]
                 self.context = self._playwright.chromium.launch_persistent_context(**options)
         except Exception:
             self._playwright.stop()
