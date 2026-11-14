@@ -18,6 +18,10 @@ export function SettingsScreen({ supabase }: { supabase: { ok: boolean; detail: 
     void request<{ settings: Settings }>("/api/settings").then((body) => setSettings(body.settings)).catch((exc: Error) => setError(exc.message));
     void request<Health>("/api/health").then(setHealth).catch(() => undefined);
     const client = createClient();
+    if (!client) {
+      setBrowserCount("Supabase env is missing.");
+      return;
+    }
     void client.from("posts").select("id").limit(1).then(({ data, error: readError }) => {
       setBrowserCount(readError ? readError.message : `${data?.length ?? 0} recent posts visible in the browser`);
     });

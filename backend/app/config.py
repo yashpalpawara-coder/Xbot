@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     local_store_path: str = ""
     host: str = "127.0.0.1"
     port: int = 8787
+    cors_origins: str = ""
 
     @property
     def profile_path(self) -> Path:

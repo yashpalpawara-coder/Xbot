@@ -4,8 +4,10 @@ import asyncio
 import json
 
 from fastapi import APIRouter, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, Field
 
+from app.browser_session import remote_click, remote_key, remote_screen, remote_type
 from app.errors import AppError
 from app.schemas import ApproveIn, CommentEdit, CommentGenerate, DailyApproveIn, DailyPostIn, GrokFindIn, ProductAnalyzeIn, ProductReviseIn, ProductVerifyIn, PublishIn, SavedIn, SearchIn, SettingsIn
 from app.state import get_state
@@ -37,6 +39,32 @@ def check_x() -> dict[str, object]:
 @router.post("/sessions/chatgpt/check")
 def check_chatgpt() -> dict[str, object]:
     return get_state().service.check_chatgpt()
+
+
+class ScreenInput(BaseModel):
+    x: int | None = None
+    y: int | None = None
+    text: str = Field(default="", max_length=200)
+    key: str = ""
+
+
+@router.get("/sessions/screen")
+def session_screen() -> Response:
+    png = remote_screen()
+    if not png:
+        return Response(status_code=204)
+    return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@router.post("/sessions/input")
+def session_input(body: ScreenInput) -> dict[str, bool]:
+    if body.x is not None and body.y is not None:
+        remote_click(body.x, body.y)
+    if body.text:
+        remote_type(body.text)
+    if body.key:
+        remote_key(body.key)
+    return {"ok": True}
 
 
 @router.post("/finder/search")

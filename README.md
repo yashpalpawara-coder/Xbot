@@ -38,6 +38,41 @@ npm run dev
 
 Open http://127.0.0.1:3000.
 
+## Deploy on GCP (Cloud Run)
+
+The dashboard is a Next.js Cloud Run service. The API is a second Cloud Run service with Playwright Chromium (2 CPU, 4 GiB, min instances 1 so in-memory jobs and the browser stay alive).
+
+1. Create a GCP project and enable billing.
+2. Install [gcloud](https://cloud.google.com/sdk/docs/install) and Docker Desktop.
+3. Sign in and pick the project:
+
+```bash
+gcloud init
+gcloud auth application-default login
+gcloud config set project YOUR_PROJECT_ID
+```
+
+4. Apply `supabase/schema.sql` if you want data to survive deploys, then:
+
+```bash
+export PROJECT_ID=YOUR_PROJECT_ID
+export REGION=us-central1
+export SUPABASE_URL=https://your-project.supabase.co
+export SUPABASE_PUBLISHABLE_KEY=your-key
+chmod +x deploy/gcp.sh
+./deploy/gcp.sh
+```
+
+To keep the X Chrome profile across restarts, add a bucket:
+
+```bash
+BUCKET=YOUR_PROJECT_ID-xbot-data ./deploy/gcp.sh
+```
+
+The script prints the dashboard URL. Save the X username and password in Settings after it is up. X may still challenge logins from Google IPs; complete any extra check if the session stays open, or log in once locally and copy `backend/data/chrome-profile` into the bucket.
+
+`gcloud` is not installed in this workspace, so the first deploy has to run on a machine that has Docker and the Cloud SDK.
+
 ## Use
 
 1. In Settings, enter the X username or email and password, then save.

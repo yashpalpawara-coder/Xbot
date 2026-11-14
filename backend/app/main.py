@@ -8,17 +8,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
+from app.config import get_settings
 from app.errors import AppError
 from app.routes import router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
+def _cors_origins() -> list[str]:
+    origins = ["http://127.0.0.1:3000", "http://localhost:3000"]
+    extra = get_settings().cors_origins.strip()
+    if extra:
+        origins.extend(item.strip() for item in extra.split(",") if item.strip())
+    return origins
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="XBot")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:3000", "http://localhost:3000"],
+        allow_origins=_cors_origins(),
         allow_methods=["*"],
         allow_headers=["*"],
     )

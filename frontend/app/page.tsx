@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, MouseEvent, useEffect, useState } from "react";
 
 import { JobLog } from "@/components/post-card";
 import { PostCard } from "@/components/post-card";
@@ -94,6 +94,7 @@ export default function DashboardPage() {
             <button className="btn-ghost" type="button" onClick={() => check("/api/sessions/chatgpt/check")}>Check ChatGPT</button>
           </div>
           {live ? <div className="mt-4"><JobLog message={live.message} progress={live.progress} logs={live.logs} error={live.error} /></div> : null}
+          <RemoteBrowser active={live?.status === "running"} />
         </div>
         <form className="panel p-5" onSubmit={search}>
           <h2 className="text-lg">Quick search</h2>
@@ -135,6 +136,53 @@ function Stat({ label, value }: { label: string; value: number }) {
       <span className="text-sm uppercase tracking-[0.14em] text-[var(--muted)]">{label}</span>
       <b>{value}</b>
     </article>
+  );
+}
+
+function RemoteBrowser({ active }: { active: boolean }) {
+  const [tick, setTick] = useState(0);
+  const [text, setText] = useState("");
+
+  useEffect(() => {
+    if (!active) return undefined;
+    setTick(Date.now());
+    const timer = window.setInterval(() => setTick(Date.now()), 1500);
+    return () => window.clearInterval(timer);
+  }, [active]);
+
+  if (!active) return null;
+
+  async function click(event: MouseEvent<HTMLImageElement>) {
+    const img = event.currentTarget;
+    const rect = img.getBoundingClientRect();
+    if (!rect.width || !rect.height || !img.naturalWidth) return;
+    const x = Math.round((event.clientX - rect.left) * (img.naturalWidth / rect.width));
+    const y = Math.round((event.clientY - rect.top) * (img.naturalHeight / rect.height));
+    await request("/api/sessions/input", { method: "POST", body: JSON.stringify({ x, y }) });
+  }
+
+  async function sendText(event: FormEvent) {
+    event.preventDefault();
+    if (!text) return;
+    await request("/api/sessions/input", { method: "POST", body: JSON.stringify({ text }) });
+    setText("");
+  }
+
+  return (
+    <div className="mt-4 space-y-2">
+      <p className="text-sm text-[var(--muted)]">Server browser. Click the picture or type a code. A Chrome window also opens when this app is running on your computer.</p>
+      <img
+        src={`/api/sessions/screen?t=${tick}`}
+        alt="Server browser"
+        className="w-full rounded-lg border border-[var(--line)] bg-black"
+        onClick={(event) => void click(event)}
+      />
+      <form className="flex gap-2" onSubmit={(event) => void sendText(event)}>
+        <input className="field" value={text} onChange={(event) => setText(event.target.value)} placeholder="Code or text" />
+        <button className="btn" type="submit">Type</button>
+        <button className="btn-ghost" type="button" onClick={() => void request("/api/sessions/input", { method: "POST", body: JSON.stringify({ key: "Enter" }) })}>Enter</button>
+      </form>
+    </div>
   );
 }
 

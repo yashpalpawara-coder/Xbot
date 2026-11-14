@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +51,40 @@ def _grok_conversation(url: str) -> str:
     if marker in parsed.path:
         return parsed.path.split(marker, 1)[1].split("/")[0]
     return ""
+
+_remote_lock = threading.Lock()
+_remote_png = b""
+_remote_actions: list[dict[str, object]] = []
+
+
+def remote_screen() -> bytes:
+    with _remote_lock:
+        return _remote_png
+
+
+def remote_click(x: int, y: int) -> None:
+    with _remote_lock:
+        _remote_actions.append({"click": (int(x), int(y))})
+
+
+def remote_type(text: str) -> None:
+    with _remote_lock:
+        _remote_actions.append({"type": text[:200]})
+
+
+def remote_key(key: str) -> None:
+    if key not in {"Enter", "Backspace", "Tab"}:
+        return
+    with _remote_lock:
+        _remote_actions.append({"key": key})
+
+
+def _clear_remote() -> None:
+    with _remote_lock:
+        global _remote_png
+        _remote_png = b""
+        _remote_actions.clear()
+
 
 EXTRACT_JS = """
 () => {
@@ -120,6 +155,11 @@ def _chromium_ready(path: Path) -> bool:
     return any(path.glob("chromium-*/chrome-linux*/chrome"))
 
 
+def running_on_server() -> bool:
+    """Cloud Run sets K_SERVICE; Render sets RENDER=true."""
+    return os.environ.get("RENDER") == "true" or bool(os.environ.get("K_SERVICE"))
+
+
 class BrowserSession:
     """One persistent Chrome profile. The caller holds the process-wide browser lock."""
 
@@ -150,21 +190,21 @@ class BrowserSession:
             raise RuntimeError("Chromium could not be downloaded on the server. The browser files are still missing.")
 
     def __enter__(self) -> BrowserSession:
-        on_render = os.environ.get("RENDER") == "true"
-        if on_render:
+        on_server = running_on_server()
+        if on_server:
             self._install_server_chromium()
         self.settings.profile_path.mkdir(parents=True, exist_ok=True)
         self._playwright = sync_playwright().start()
         options: dict[str, Any] = {
             "user_data_dir": str(self.settings.profile_path),
-            "headless": True if on_render else self.settings.headless,
+            "headless": True if on_server else self.settings.headless,
             "viewport": {"width": 1360, "height": 900},
             "locale": "en-US",
             "ignore_default_args": ["--enable-automation"],
             "args": ["--disable-blink-features=AutomationControlled"],
         }
         try:
-            if on_render:
+            if on_server:
                 options["args"] = [*options["args"], "--no-sandbox", "--disable-dev-shm-usage"]
                 self.context = self._playwright.chromium.launch_persistent_context(**options)
             else:
@@ -186,9 +226,34 @@ class BrowserSession:
         )
         return self
 
+    def _sync_remote(self, page: Page) -> None:
+        """Apply clicks typed in the dashboard, then publish what the server browser shows."""
+        with _remote_lock:
+            actions = list(_remote_actions)
+            _remote_actions.clear()
+        for action in actions:
+            try:
+                if "click" in action:
+                    x, y = action["click"]
+                    page.mouse.click(x, y)
+                elif "type" in action:
+                    page.keyboard.type(str(action["type"]))
+                elif "key" in action:
+                    page.keyboard.press(str(action["key"]))
+            except Exception:
+                logging.getLogger(__name__).info("remote browser action failed")
+        try:
+            png = page.screenshot(type="png")
+        except Exception:
+            return
+        with _remote_lock:
+            global _remote_png
+            _remote_png = png
+
     def __exit__(self, *_: object) -> None:
         if self.context is not None:
             self.context.close()
+        _clear_remote()
         if self._playwright is not None:
             self._playwright.stop()
 
@@ -540,7 +605,7 @@ class BrowserSession:
             except Exception:
                 return False
 
-        if self._wait_until(signed_in, wait, 480):
+        if self._wait_until(signed_in, wait, 480, tick=lambda: self._sync_remote(page)):
             return SessionState("x", "signed_in", self.x_handle(page), "Signed in to X.")
         try:
             closed = page.is_closed()
@@ -758,7 +823,7 @@ class BrowserSession:
         return self._wait_chatgpt(page, "ChatGPT did not show the composer. Finish sign-in in the Chrome window.", wait)
 
     def _wait_chatgpt(self, page: Page, detail: str, wait: Callable[[], bool] | None) -> SessionState:
-        if not self._wait_until(lambda: self.chatgpt_logged_in(page), wait):
+        if not self._wait_until(lambda: self.chatgpt_logged_in(page), wait, tick=lambda: self._sync_remote(page)):
             return SessionState("chatgpt", "needs_manual", "", detail)
         return SessionState("chatgpt", "signed_in", "", "Signed in to ChatGPT.")
 
@@ -1276,14 +1341,22 @@ class BrowserSession:
         except PlaywrightTimeout:
             return False
 
-    def _wait_until(self, check: Callable[[], bool], cancelled: Callable[[], bool] | None, seconds: int = 180) -> bool:
+    def _wait_until(
+        self,
+        check: Callable[[], bool],
+        cancelled: Callable[[], bool] | None,
+        seconds: int = 180,
+        tick: Callable[[], None] | None = None,
+    ) -> bool:
         deadline = time.time() + seconds
         while time.time() < deadline:
             if cancelled and cancelled():
                 return False
             if check():
                 return True
-            time.sleep(2)
+            if tick:
+                tick()
+            time.sleep(1)
         return False
 
     def _dismiss_cookies(self, page: Page) -> None:
