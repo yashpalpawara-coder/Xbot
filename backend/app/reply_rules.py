@@ -23,14 +23,22 @@ _GENERIC = ("great post", "nice work", "love this", "so true", "well said")
 _URL = re.compile(r"https?://\S+")
 
 
-def reply_prompt(post_text: str, post_url: str, *, name: str, url: str) -> str:
-    """The comment message. The product writeup is already in this ChatGPT chat."""
+def reply_prompt(post_text: str, post_url: str, *, name: str, url: str, analysis: str = "") -> str:
+    """The comment message. A saved analysis is pasted only when this product has no chat yet."""
     who = name.strip() or "the product"
     link = url.strip()
+    saved = analysis.strip()
+    if saved:
+        context = (
+            "Do not analyze the product again. The product analysis is already saved. Use it as the product details.\n"
+            f"{saved[:6000]}\n"
+        )
+    else:
+        context = "Do not analyze the product again. Use the product details you already extracted in this same chat.\n"
     return (
         f"Now analyze this X post: {post_url.strip()}\n"
         f"The post says: {post_text.strip()}\n"
-        "Use the product details you already extracted in this same chat.\n"
+        f"{context}"
         f"Write one reply that {who} can post under that same post.\n"
         f"You are {who}. The account is {who}, so speak as {who} in first person. \"I\" means {who}. "
         f"Never write as a user of {who}. Do not say \"I use {who}\", \"I've been using {who}\", "

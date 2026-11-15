@@ -256,19 +256,49 @@ class LocalStore:
             self._write(data)
         return row
 
-    def latest_product(self) -> dict[str, Any] | None:
+    def list_products(self) -> list[dict[str, Any]]:
         with self._lock:
-            rows = [item for item in self._read()["products"] if isinstance(item, dict)]
+            return [item for item in self._read()["products"] if isinstance(item, dict)]
+
+    def get_product(self, product_id: str) -> dict[str, Any] | None:
+        wanted = str(product_id or "")
+        if not wanted:
+            return None
+        for item in self.list_products():
+            if str(item.get("id") or "") == wanted:
+                return item
+        return None
+
+    def find_product(self, name: str, url: str) -> dict[str, Any] | None:
+        name_key = " ".join(name.split()).casefold()
+        url_key = url.strip().rstrip("/").casefold()
+        by_name = None
+        by_url = None
+        for item in self.list_products():
+            item_name = " ".join(str(item.get("name") or "").split()).casefold()
+            item_url = str(item.get("url") or "").strip().rstrip("/").casefold()
+            if name_key and item_name == name_key:
+                by_name = item
+            elif url_key and item_url == url_key:
+                by_url = item
+        return by_name or by_url
+
+    def latest_product(self) -> dict[str, Any] | None:
+        rows = self.list_products()
         return rows[-1] if rows else None
 
     def add_coming(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         with self._lock:
             data = self._read()
-            known = {str(item.get("external_id") or "") for item in data["coming"]}
+            known = {
+                (str(item.get("product_id") or ""), str(item.get("external_id") or ""))
+                for item in data["coming"]
+                if isinstance(item, dict)
+            }
             added: list[dict[str, Any]] = []
             for row in rows:
-                key = str(row.get("external_id") or "")
-                if not key or key in known:
+                key = (str(row.get("product_id") or ""), str(row.get("external_id") or ""))
+                if not key[1] or key in known:
                     continue
                 known.add(key)
                 data["coming"].append(row)
@@ -277,20 +307,52 @@ class LocalStore:
             self._write(data)
         return added
 
-    def list_coming(self) -> list[dict[str, Any]]:
+    def claim_coming(self, product_id: str) -> int:
+        """Posts saved before products were split stay with the product selected now."""
+        wanted = str(product_id or "")
+        if not wanted:
+            return 0
+        with self._lock:
+            data = self._read()
+            owned = {
+                str(item.get("external_id") or "")
+                for item in data["coming"]
+                if isinstance(item, dict) and str(item.get("product_id") or "") == wanted
+            }
+            changed = 0
+            for item in data["coming"]:
+                if not isinstance(item, dict) or str(item.get("product_id") or ""):
+                    continue
+                key = str(item.get("external_id") or "")
+                if key and key in owned:
+                    continue
+                item["product_id"] = wanted
+                if key:
+                    owned.add(key)
+                changed += 1
+            if changed:
+                self._write(data)
+        return changed
+
+    def list_coming(self, product_id: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
             rows = [item for item in self._read()["coming"] if isinstance(item, dict)]
+        if product_id is not None:
+            rows = [item for item in rows if str(item.get("product_id") or "") == str(product_id)]
         return list(reversed(rows))
 
-    def update_coming(self, external_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+    def update_coming(self, external_id: str, fields: dict[str, Any], product_id: str | None = None) -> dict[str, Any] | None:
         with self._lock:
             data = self._read()
             found = None
             for item in data["coming"]:
-                if str(item.get("external_id") or "") == str(external_id):
-                    item.update(fields)
-                    found = item
-                    break
+                if str(item.get("external_id") or "") != str(external_id):
+                    continue
+                if product_id is not None and str(item.get("product_id") or "") != str(product_id):
+                    continue
+                item.update(fields)
+                found = item
+                break
             if found is None:
                 return None
             self._write(data)
@@ -629,17 +691,29 @@ class Store:
     def save_product(self, row: dict[str, Any]) -> dict[str, Any]:
         return self.local.save_product(row)
 
+    def list_products(self) -> list[dict[str, Any]]:
+        return self.local.list_products()
+
+    def get_product(self, product_id: str) -> dict[str, Any] | None:
+        return self.local.get_product(product_id)
+
+    def find_product(self, name: str, url: str) -> dict[str, Any] | None:
+        return self.local.find_product(name, url)
+
     def latest_product(self) -> dict[str, Any] | None:
         return self.local.latest_product()
 
     def add_coming(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return self.local.add_coming(rows)
 
-    def list_coming(self) -> list[dict[str, Any]]:
-        return self.local.list_coming()
+    def claim_coming(self, product_id: str) -> int:
+        return self.local.claim_coming(product_id)
 
-    def update_coming(self, external_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
-        return self.local.update_coming(external_id, fields)
+    def list_coming(self, product_id: str | None = None) -> list[dict[str, Any]]:
+        return self.local.list_coming(product_id)
+
+    def update_coming(self, external_id: str, fields: dict[str, Any], product_id: str | None = None) -> dict[str, Any] | None:
+        return self.local.update_coming(external_id, fields, product_id)
 
     def _db(self) -> Any:
         return self.remote if self.remote is not None else self.local

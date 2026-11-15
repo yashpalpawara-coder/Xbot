@@ -70,6 +70,22 @@ export default function AnalyticsPage() {
       })
       .catch((exc: Error) => setError(exc.message))
       .finally(() => setReady(true));
+    function onProduct() {
+      void request<ActivitySnapshot>("/api/activity")
+        .then((snapshot) => {
+          setActivity(snapshot);
+          if (snapshot.collected_at) window.localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+        })
+        .catch(() => undefined);
+      void request<DailyPostState>("/api/post/today")
+        .then((saved) => {
+          setPostState(saved);
+          window.localStorage.setItem(POST_KEY, JSON.stringify(saved));
+        })
+        .catch(() => undefined);
+    }
+    window.addEventListener("xbot-product", onProduct);
+    return () => window.removeEventListener("xbot-product", onProduct);
   }, []);
 
   useEffect(() => {

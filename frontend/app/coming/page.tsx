@@ -4,11 +4,12 @@ import { useEffect, useState } from "react";
 
 import { JobLog } from "@/components/post-card";
 import { request } from "@/lib/api";
-import type { ComingPost, Job } from "@/lib/types";
+import type { ComingPost, Job, VerifiedProduct } from "@/lib/types";
 import { useJob } from "@/lib/use-job";
 
 export default function ComingPage() {
   const [posts, setPosts] = useState<ComingPost[]>([]);
+  const [productName, setProductName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const job = useJob(jobId);
@@ -18,12 +19,21 @@ export default function ComingPage() {
   }).length;
 
   async function load() {
-    const body = await request<{ posts: ComingPost[] }>("/api/finder/coming");
+    const [body, productBody] = await Promise.all([
+      request<{ posts: ComingPost[] }>("/api/finder/coming"),
+      request<{ product: VerifiedProduct | null }>("/api/product"),
+    ]);
     setPosts(body.posts || []);
+    setProductName(productBody.product?.name || "");
   }
 
   useEffect(() => {
     void load().catch((exc: Error) => setError(exc.message));
+    function onProduct() {
+      void load().catch((exc: Error) => setError(exc.message));
+    }
+    window.addEventListener("xbot-product", onProduct);
+    return () => window.removeEventListener("xbot-product", onProduct);
   }, []);
 
   useEffect(() => {
@@ -62,7 +72,8 @@ export default function ComingPage() {
       </header>
       <section className="panel space-y-4 p-5">
         <p className="text-sm text-[var(--muted)]">
-          {posts.length} saved. {waiting} left. Each reply is posted, that post is liked, then the next one waits 30 seconds.
+          {productName ? `${productName}’s list. ` : ""}
+          {posts.length} saved. {waiting} left. Replies use the saved analysis, then each post is liked, then the next one waits 30 seconds.
         </p>
         <div className="flex flex-wrap gap-2">
           <button className="btn" type="button" onClick={() => void start()} disabled={waiting === 0 || job?.status === "running"}>

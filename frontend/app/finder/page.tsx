@@ -148,10 +148,12 @@ function ProductFind() {
     ]);
     const product = productBody.product;
     const writeup = today.details?.writeup?.trim() || "";
-    const text = writeup || product?.detail || "";
+    const dailyName = today.details?.name?.trim() || "";
+    const sameProduct = !product?.name || !dailyName || dailyName === product.name;
+    const text = (sameProduct ? writeup : "") || product?.detail || "";
     setDetail(text);
-    setName(today.details?.name || product?.name || settingsBody.settings.product_name || "");
-    setUrl(today.details?.url || product?.url || settingsBody.settings.product_url || "");
+    setName((sameProduct ? today.details?.name : "") || product?.name || settingsBody.settings.product_name || "");
+    setUrl((sameProduct ? today.details?.url : "") || product?.url || settingsBody.settings.product_url || "");
     setSavedDetail(product?.detail || "");
     setFinderVerified(Boolean(product?.finder_verified));
     setComing(list.posts || []);
@@ -159,6 +161,11 @@ function ProductFind() {
 
   useEffect(() => {
     void load().catch((exc: Error) => setError(exc.message));
+    function onProduct() {
+      void load().catch((exc: Error) => setError(exc.message));
+    }
+    window.addEventListener("xbot-product", onProduct);
+    return () => window.removeEventListener("xbot-product", onProduct);
   }, []);
 
   useEffect(() => {

@@ -7,6 +7,7 @@ def test_reply_uses_the_same_chat_prompt() -> None:
     assert message.startswith("Now analyze this X post: https://x.com/Helios_Movement/status/2118251689379533184")
     assert f"The post says: {post}" in message
     assert "already extracted in this same chat" in message
+    assert "Do not analyze the product again" in message
     assert "I\" means Ted" in message
     assert "I use Ted" in message
     assert message.endswith("Put only the finished reply in one code block, so the copy box contains the reply and nothing else.")
@@ -20,6 +21,12 @@ def test_reply_uses_the_same_chat_prompt() -> None:
     assert any("user" in item for item in reply_problems(user_voice, name="Ted", url="https://tedcoachai.com", post_text="Mac"))
     tagged = good + " #Focus"
     assert any("hashtag" in item for item in reply_problems(tagged, name="Ted", url="https://tedcoachai.com", post_text="Mac"))
+    saved = reply_prompt(post, "https://x.com/Helios_Movement/status/2118251689379533184", name="Ted", url="https://tedcoachai.com", analysis="Ted is a Mac app for three morning tasks.")
+    assert saved.startswith("Now analyze this X post:")
+    assert "Do not analyze the product again" in saved
+    assert "already saved" in saved
+    assert "Ted is a Mac app for three morning tasks." in saved
+    assert "already extracted in this same chat" not in saved
     assert taken_reply("Sure\n```\nHello Ted on Mac 🌿 https://tedcoachai.com\n```") == "Hello Ted on Mac 🌿 https://tedcoachai.com"
     labeled = "Plain text Notch timers are a great use of that Mac space! ⏱ I'm Ted. https://tedcoachai.com"
     assert reply_problems(taken_reply(labeled), name="Ted", url="https://tedcoachai.com", post_text="Mac notch") == []

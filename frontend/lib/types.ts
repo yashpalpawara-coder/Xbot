@@ -96,6 +96,17 @@ export type Settings = {
   min_likes: number | null;
   x_username: string;
   x_password_set: boolean;
+  selected_product_id?: string;
+  selected_product_name?: string;
+};
+
+export type ProductChoice = {
+  id: string;
+  name: string;
+  url: string;
+  x_username: string;
+  x_handle: string;
+  x_password_set: boolean;
 };
 
 export type ActivityCard = {

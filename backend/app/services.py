@@ -16,6 +16,7 @@ from app.jobs import JobManager
 from app.prompts import analysis_prompt, comments_prompt, regenerate_prompt
 from app.reply_rules import reply_problems, reply_prompt, rewrite_reply_prompt, taken_reply
 from app.writer import compose_draft, earlier_texts, mark_posted, prepare_details, public_state, revise_details, store_details, store_draft
+from app.x_account import same_account
 from app.schemas import AnalysisBody, CommentBody, SearchIn, SettingsIn
 from app.scoring import combined_score, guess_language
 from app.store import Store
@@ -30,6 +31,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "min_views": None,
     "min_likes": None,
     "x_username": "",
+    "selected_product_id": "",
 }
 
 
@@ -79,9 +81,27 @@ class Service:
         return merged
 
     def current_settings(self) -> dict[str, Any]:
-        return _public_settings(self._raw_settings())
+        raw = self._raw_settings()
+        product = self._selected_raw()
+        public = _public_settings(raw)
+        public["selected_product_id"] = str((product or {}).get("id") or raw.get("selected_product_id") or "")
+        public["selected_product_name"] = str((product or {}).get("name") or "")
+        if product is not None:
+            public["x_username"] = str(product.get("x_username") or "")
+            public["x_password_set"] = bool(str(product.get("x_password") or ""))
+        return public
 
     def _apply_x_login(self) -> None:
+        product = self._selected_raw()
+        if product is not None and (str(product.get("x_username") or "").strip() or str(product.get("x_password") or "")):
+            username = str(product.get("x_username") or "").strip()
+            self.settings.x_username = username
+            self.settings.x_password = str(product.get("x_password") or "")
+            handle = str(product.get("x_handle") or "").strip().lstrip("@")
+            if not handle and username and "@" not in username:
+                handle = username.lstrip("@")
+            self.settings.x_handle = handle
+            return
         raw = self._raw_settings()
         username = str(raw.get("x_username") or "").strip()
         password = str(raw.get("x_password") or "")
@@ -89,17 +109,152 @@ class Service:
             self.settings.x_username = username
         if password:
             self.settings.x_password = password
+        if username and "@" not in username:
+            self.settings.x_handle = username.lstrip("@")
+
+    def _selected_raw(self) -> dict[str, Any] | None:
+        selected = str(self._raw_settings().get("selected_product_id") or "")
+        if selected:
+            row = self.store.get_product(selected)
+            if row is not None:
+                return row
+        return self.store.latest_product()
+
+    def _coming_rows(self, product: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not isinstance(product, dict) or not product.get("id"):
+            return self.store.list_coming()
+        product_id = str(product["id"])
+        self.store.claim_coming(product_id)
+        return self.store.list_coming(product_id)
+
+    def _public_product(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(row, dict):
+            return None
+        return {
+            "id": row.get("id"),
+            "name": row.get("name") or "",
+            "url": row.get("url") or "",
+            "detail": row.get("detail") or "",
+            "finder_verified": bool(row.get("finder_verified")),
+            "verified_at": row.get("verified_at") or "",
+            "x_username": row.get("x_username") or "",
+            "x_handle": row.get("x_handle") or "",
+            "x_password_set": bool(str(row.get("x_password") or "")),
+            "chat_url": row.get("chat_url") or "",
+        }
+
+    def list_products(self) -> dict[str, Any]:
+        selected = self._selected_raw()
+        rows = self.store.list_products()
+        rows.sort(key=lambda item: str(item.get("name") or "").casefold())
+        return {
+            "products": [self._public_product(row) for row in rows],
+            "selected_id": str((selected or {}).get("id") or ""),
+        }
+
+    def select_product(self, product_id: str) -> dict[str, Any]:
+        product = self.store.get_product(product_id)
+        if product is None:
+            raise AppError("That product is not saved.", 404, "not_found")
+        raw = self._raw_settings()
+        raw["selected_product_id"] = str(product["id"])
+        raw["product_name"] = str(product.get("name") or raw.get("product_name") or "")
+        raw["product_url"] = str(product.get("url") or raw.get("product_url") or "")
+        detail = str(product.get("detail") or "")
+        if detail:
+            raw["product_pitch"] = detail[:2000]
+        self.store.save_settings(raw)
+        self._apply_x_login()
+        self._show_product(product)
+        fresh = self.store.get_product(str(product["id"])) or product
+        return self.jobs.start("x_switch", lambda job: self._switch_account(job, fresh))
+
+    def _show_product(self, product: dict[str, Any]) -> None:
+        current = public_state(self._post_path()).get("details")
+        saved = dict(current) if isinstance(current, dict) else {}
+        text = str(product.get("detail") or "")
+        saved.update(
+            {
+                "writeup": text,
+                "summary": " ".join(text.split())[:500],
+                "name": str(product.get("name") or ""),
+                "url": str(product.get("url") or ""),
+                "verified": bool(text),
+                "chat_url": str(product.get("chat_url") or ""),
+            }
+        )
+        store_details(self._post_path(), saved)
+
+    def _switch_account(self, job: dict[str, Any], product: dict[str, Any]) -> dict[str, Any]:
+        fresh = self.store.get_product(str(product.get("id") or "")) or product
+        with BrowserSession(self.settings) as session:
+            self._require_account(session, job, fresh)
+        saved = self.store.get_product(str(fresh.get("id") or "")) or fresh
+        handle = str(saved.get("x_handle") or "").lstrip("@")
+        name = str(saved.get("name") or "this product")
+        message = f"Signed in as @{handle} for {name}." if handle else f"Signed in for {name}."
+        self.jobs.update(job["id"], message=message, progress=100)
+        return {"product": self._public_product(saved)}
+
+    def _require_account(self, session: BrowserSession, job: dict[str, Any], product: dict[str, Any]) -> None:
+        """Use the selected product's X login. An open session for another account is signed out first."""
+        username = str(product.get("x_username") or "").strip()
+        password = str(product.get("x_password") or "")
+        handle = str(product.get("x_handle") or "")
+        self.settings.x_username = username
+        self.settings.x_password = password
+        self.settings.x_handle = handle.strip().lstrip("@") or (username if username and "@" not in username else "")
+
+        def notice(message: str) -> None:
+            self.jobs.log(job["id"], message, progress=15)
+
+        state = session.use_x_account(username, password, handle, _cancelled(job), notice)
+        if state.status != "signed_in":
+            raise RuntimeError(state.detail)
+        if state.handle:
+            current = self.store.get_product(str(product.get("id") or "")) or product
+            if str(current.get("x_handle") or "") != state.handle:
+                updated = dict(current)
+                updated["x_handle"] = state.handle
+                self.store.save_product(updated)
+                product["x_handle"] = state.handle
+        self._remember(state)
+
+    def _keep_chat(self, session: BrowserSession, product: dict[str, Any], chat_url: str, fresh_chat: bool) -> tuple[str, bool]:
+        fresh = str(session.chatgpt_url or "")
+        if fresh.startswith("https://chatgpt.com/c/") and fresh != chat_url:
+            chat_url = fresh
+            fresh_chat = False
+            updated = dict(self.store.get_product(str(product.get("id") or "")) or product)
+            updated["chat_url"] = chat_url
+            self.store.save_product(updated)
+            product["chat_url"] = chat_url
+        elif chat_url.startswith("https://chatgpt.com/c/"):
+            fresh_chat = False
+        return chat_url, fresh_chat
 
     def save_settings(self, body: SettingsIn) -> dict[str, Any]:
         payload = body.model_dump()
         existing = self._raw_settings()
-        password = str(payload.get("x_password") or "")
-        payload["x_password"] = password or str(existing.get("x_password") or "")
+        typed = str(payload.get("x_password") or "")
         payload["x_username"] = str(payload.get("x_username") or "").strip()
-        saved = self.store.save_settings(payload)
-        self.store.log("settings", "saved", payload["product_name"])
+        payload["selected_product_id"] = str(existing.get("selected_product_id") or "")
+        product = self.store.get_product(payload["selected_product_id"]) if payload["selected_product_id"] else None
+        if product is not None:
+            payload["x_password"] = typed or str(product.get("x_password") or "")
+        else:
+            payload["x_password"] = typed or str(existing.get("x_password") or "")
+        self.store.save_settings(payload)
+        if product is not None:
+            updated = dict(product)
+            updated["x_username"] = payload["x_username"]
+            updated["x_password"] = payload["x_password"]
+            if payload["x_username"] and "@" not in payload["x_username"]:
+                updated["x_handle"] = payload["x_username"].lstrip("@")
+            self.store.save_product(updated)
+        self.store.log("settings", "saved", str(payload.get("product_name") or ""))
         self._apply_x_login()
-        return _public_settings(saved)
+        return self.current_settings()
 
     def session_status(self) -> dict[str, Any]:
         accounts = {item["platform"]: item for item in self.store.accounts()}
@@ -165,23 +320,22 @@ class Service:
         return self.jobs.start("finder_search", lambda job: self._search(job, body, query))
 
     def list_coming(self) -> list[dict[str, Any]]:
-        return self.store.list_coming()
+        return self._coming_rows(self._selected_raw())
 
     def start_grok_find(self, count: int = 20) -> dict[str, Any]:
-        product = self.latest_product()
+        product = self._selected_raw()
         if not isinstance(product, dict) or not product.get("finder_verified"):
             raise AppError("Verify the product on Finder first.", 409, "not_verified")
-        current = public_state(self._post_path()).get("details")
-        shown = str(current.get("writeup") or "").strip() if isinstance(current, dict) else ""
-        if shown and shown != str(product.get("detail") or "").strip():
+        if not str(product.get("detail") or "").strip():
             raise AppError("Verify the product on Finder first.", 409, "not_verified")
         count = batch_count(count)
         return self.jobs.start("grok_find", lambda job: self._grok_find(job, product, count))
 
     def _grok_find(self, job: dict[str, Any], product: dict[str, Any], count: int = 20) -> dict[str, Any]:
-        seen = {str(row.get("external_id") or "") for row in self.store.list_coming()}
+        seen = {str(row.get("external_id") or "") for row in self._coming_rows(product)}
         added = 0
         with BrowserSession(self.settings) as session:
+            self._require_account(session, job, product)
             self.jobs.log(job["id"], "Telling Grok the product. No search yet.", progress=15)
             session.ask_grok(
                 product_message(str(product.get("name") or ""), str(product.get("url") or ""), str(product.get("detail") or "")),
@@ -192,20 +346,20 @@ class Service:
             chat = session.grok_url
             self.jobs.log(job["id"], f"Asking Grok for {count} posts.", progress=30)
             reply = session.ask_grok(find_message(count), _cancelled(job), chat_url=chat, expect_posts=True)
-            added += self._save_grok_posts(reply, seen)
+            added += self._save_grok_posts(reply, seen, str(product.get("id") or ""))
             for round_index in range(7):
                 if _cancelled(job)() or limit_reached(reply):
                     break
                 self.jobs.log(job["id"], f"Asking Grok for {count} more.", progress=40 + round_index * 8)
                 reply = session.ask_grok(more_message(count), _cancelled(job), chat_url=session.grok_url or chat, expect_posts=True)
-                fresh = self._save_grok_posts(reply, seen)
+                fresh = self._save_grok_posts(reply, seen, str(product.get("id") or ""))
                 added += fresh
                 if fresh == 0 or limit_reached(reply):
                     break
         self.jobs.update(job["id"], message=f"{added} posts added to the coming list.", progress=100)
         return {"added": added}
 
-    def _save_grok_posts(self, reply: str, seen: set[str]) -> int:
+    def _save_grok_posts(self, reply: str, seen: set[str], product_id: str = "") -> int:
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         rows: list[dict[str, Any]] = []
         for item in posts_from_reply(reply):
@@ -240,44 +394,52 @@ class Service:
                     "status": "saved",
                     "reply": "",
                     "comment_id": None,
+                    "product_id": product_id,
                     "added_at": now,
                 }
             )
         return len(self.store.add_coming(rows))
 
     def start_coming_comments(self) -> dict[str, Any]:
+        product = self._selected_raw()
+        if not isinstance(product, dict) or not str(product.get("detail") or "").strip():
+            raise AppError("Verify the product on Finder first.", 409, "not_verified")
         pending = [
             row
-            for row in self.store.list_coming()
+            for row in self._coming_rows(product)
             if str(row.get("status") or "saved") in {"saved", "drafted"}
         ]
         if not pending:
             raise AppError("The coming list is empty.", 409, "empty")
-        product = self.latest_product()
-        if not isinstance(product, dict) or not str(product.get("detail") or "").strip():
-            raise AppError("Verify the product on Finder first.", 409, "not_verified")
-        saved = public_state(self._post_path()).get("details")
-        chat_url = str(saved.get("chat_url") or "") if isinstance(saved, dict) else ""
-        needs_write = any(not str(row.get("reply") or "").strip() for row in pending)
-        if needs_write and not chat_url.startswith("https://chatgpt.com/c/"):
-            raise AppError("Analyze the product first. Comments use that same ChatGPT chat.", 409, "missing_chat")
         return self.jobs.start("coming_comments", lambda job: self._coming_comments(job, pending, product))
 
     def _coming_comments(self, job: dict[str, Any], pending: list[dict[str, Any]], product: dict[str, Any]) -> dict[str, Any]:
-        """Write a reply, post it, like that post, then wait 30 seconds."""
+        """Write a reply from the saved analysis, post it, like that post, then wait 30 seconds."""
         name = str(product.get("name") or "")
         url = str(product.get("url") or "")
-        saved = public_state(self._post_path()).get("details")
-        chat_url = str(saved.get("chat_url") or "") if isinstance(saved, dict) else ""
+        detail = str(product.get("detail") or "")
+        product_id = str(product.get("id") or "")
+        chat_url = str(product.get("chat_url") or "")
         if not chat_url.startswith("https://chatgpt.com/c/"):
-            raise RuntimeError("The product chat is missing. Analyze the product first, then comment in that same chat.")
+            saved = public_state(self._post_path()).get("details")
+            if isinstance(saved, dict) and str(saved.get("name") or "").strip().casefold() == name.casefold():
+                maybe = str(saved.get("chat_url") or "")
+                if maybe.startswith("https://chatgpt.com/c/"):
+                    chat_url = maybe
+                    product["chat_url"] = chat_url
+        fresh_chat = not chat_url.startswith("https://chatgpt.com/c/")
         posted = 0
         done = {
             str(row.get("external_id") or "")
-            for row in self.store.list_coming()
+            for row in self.store.list_coming(product_id or None)
             if str(row.get("status") or "") in {"published", "uncertain", "posting"}
         }
+
+        def mark(external_id: str, fields: dict[str, Any]) -> None:
+            self.store.update_coming(external_id, fields, product_id or None)
+
         with BrowserSession(self.settings) as session:
+            self._require_account(session, job, product)
             total = len(pending)
             for index, row in enumerate(pending):
                 if _cancelled(job)():
@@ -298,7 +460,7 @@ class Service:
                     text = str((opened or {}).get("text") or "").strip()
                     handle = str((opened or {}).get("handle") or handle)
                 if len(text) < 12:
-                    self.store.update_coming(str(row.get("external_id") or ""), {"status": "skipped", "reply": "Too little text to reply to."})
+                    mark(str(row.get("external_id") or ""), {"status": "skipped", "reply": "Too little text to reply to."})
                     continue
                 if opened:
                     stored_post = self.store.upsert_post(
@@ -331,11 +493,18 @@ class Service:
                 if not reply:
                     raw = self._complete(
                         session,
-                        reply_prompt(text, str(row.get("url") or ""), name=name, url=url),
+                        reply_prompt(
+                            text,
+                            str(row.get("url") or ""),
+                            name=name,
+                            url=url,
+                            analysis=detail if fresh_chat else "",
+                        ),
                         _cancelled(job),
-                        chat_url,
+                        "" if fresh_chat else chat_url,
                         2,
                     )
+                    chat_url, fresh_chat = self._keep_chat(session, product, chat_url, fresh_chat)
                     reply = taken_reply(raw)
                     problems = reply_problems(reply, name=name, url=url, post_text=text)
                     if problems:
@@ -343,13 +512,14 @@ class Service:
                             session,
                             rewrite_reply_prompt(" ".join(problems), name=name, url=url),
                             _cancelled(job),
-                            chat_url,
+                            "" if fresh_chat else chat_url,
                             2,
                         )
+                        chat_url, fresh_chat = self._keep_chat(session, product, chat_url, fresh_chat)
                         reply = taken_reply(raw)
                         problems = reply_problems(reply, name=name, url=url, post_text=text)
                     if problems:
-                        self.store.update_coming(str(row.get("external_id") or ""), {"status": "skipped", "reply": " ".join(problems)})
+                        mark(str(row.get("external_id") or ""), {"status": "skipped", "reply": " ".join(problems)})
                         continue
                     comment = self.store.add_comment(
                         {
@@ -365,28 +535,28 @@ class Service:
                         }
                     )
                     comment_id = comment["id"]
-                    self.store.update_coming(
+                    mark(
                         str(row.get("external_id") or ""),
                         {"status": "drafted", "reply": reply, "comment_id": comment_id, "post_id": stored_post["id"]},
                     )
                 status_url = str(row.get("url") or stored_post.get("url") or "")
-                self.store.update_coming(str(row.get("external_id") or ""), {"status": "posting", "reply": reply})
+                mark(str(row.get("external_id") or ""), {"status": "posting", "reply": reply})
                 self.jobs.log(job["id"], "Posting one reply, then liking that post.")
                 try:
                     outcome = session.drop_reply(status_url, reply)
                 except Exception as exc:
                     if comment_id:
                         self.store.update_comment(comment_id, {"status": "approved"})
-                    self.store.update_coming(str(row.get("external_id") or ""), {"status": "drafted", "reply": reply})
-                    detail = str(exc).split("Call log:", 1)[0].strip()
-                    if "Timeout" in detail or len(detail) > 180:
-                        detail = "The reply button was covered, so this post was skipped."
-                    self.jobs.log(job["id"], detail or "This post was skipped.")
+                    mark(str(row.get("external_id") or ""), {"status": "drafted", "reply": reply})
+                    reason = str(exc).split("Call log:", 1)[0].strip()
+                    if "Timeout" in reason or len(reason) > 180:
+                        reason = "The reply button was covered, so this post was skipped."
+                    self.jobs.log(job["id"], reason or "This post was skipped.")
                     continue
                 comment_status = "published" if outcome == "published" else "uncertain"
                 if comment_id:
                     self.store.update_comment(comment_id, {"status": comment_status})
-                self.store.update_coming(str(row.get("external_id") or ""), {"status": comment_status, "reply": reply})
+                mark(str(row.get("external_id") or ""), {"status": comment_status, "reply": reply})
                 posted += 1
                 self.jobs.log(job["id"], "Reply posted and the post was liked. Waiting 30 seconds.")
                 for _ in range(30):
@@ -702,7 +872,11 @@ class Service:
         updated = self.store.update_comment(comment_id, {"status": "approved"})
         for row in self.store.list_coming():
             if row.get("comment_id") == comment_id:
-                self.store.update_coming(str(row.get("external_id") or ""), {"status": "approved", "reply": updated["text"]})
+                self.store.update_coming(
+                    str(row.get("external_id") or ""),
+                    {"status": "approved", "reply": updated["text"]},
+                    str(row.get("product_id") or "") or None,
+                )
         self.store.log("comments", "approved", comment_id)
         return updated
 
@@ -772,7 +946,11 @@ class Service:
         updated_comment = self.store.update_comment(comment_id, {"status": status})
         for row in self.store.list_coming():
             if row.get("comment_id") == comment_id:
-                self.store.update_coming(str(row.get("external_id") or ""), {"status": status, "reply": comment["text"]})
+                self.store.update_coming(
+                    str(row.get("external_id") or ""),
+                    {"status": status, "reply": comment["text"]},
+                    str(row.get("product_id") or "") or None,
+                )
         self.store.log("publish", status, comment_id)
         self.jobs.update(job["id"], message=detail, progress=100)
         return {"event": updated_event, "comment": updated_comment}
@@ -833,7 +1011,19 @@ class Service:
         return {"counts": self.store.counts(), "logs": self.store.list_logs(20), "database": self.store.mode}
 
     def activity_snapshot(self) -> dict[str, Any]:
-        return load_activity(self._activity_path())
+        path = self._activity_path()
+        snapshot = load_activity(path)
+        if snapshot.get("collected_at"):
+            return snapshot
+        product = self._selected_raw()
+        legacy_path = self.settings.store_path.parent / "activity.json"
+        if product is None or path == legacy_path:
+            return snapshot
+        legacy = load_activity(legacy_path)
+        handle = str(legacy.get("handle") or "")
+        if legacy.get("collected_at") and same_account(handle, str(product.get("x_username") or ""), str(product.get("x_handle") or "")):
+            return legacy
+        return snapshot
 
     def start_activity(self) -> dict[str, Any]:
         return self.jobs.start("activity", self._scan_activity)
@@ -849,7 +1039,11 @@ class Service:
         return self.jobs.start("activity_draft", lambda job: self._draft_activity(job, row))
 
     def _activity_path(self) -> Any:
-        return self.settings.store_path.parent / "activity.json"
+        folder = self.settings.store_path.parent
+        product = self._selected_raw()
+        if isinstance(product, dict) and product.get("id"):
+            return folder / f"activity-{product['id']}.json"
+        return folder / "activity.json"
 
     def _post_path(self) -> Any:
         return self.settings.store_path.parent / "daily_post.json"
@@ -879,16 +1073,34 @@ class Service:
         shown = str(current.get("writeup") or "").strip() if isinstance(current, dict) else ""
         if shown and text != shown:
             raise AppError("Verify the analysis that is on the page.", 409, "detail_mismatch")
+        existing = self.store.find_product(product_name, product_url) or {}
+        prefs = self._raw_settings()
+        username = str(existing.get("x_username") or "")
+        password = str(existing.get("x_password") or "")
+        handle = str(existing.get("x_handle") or "")
+        if not username and not password:
+            saved_name = str(prefs.get("product_name") or "").strip().casefold()
+            if saved_name and saved_name == product_name.casefold() and str(prefs.get("x_username") or "").strip():
+                username = str(prefs.get("x_username") or "").strip()
+                password = str(prefs.get("x_password") or "")
+                handle = username.lstrip("@") if "@" not in username else handle
+        chat_url = str(existing.get("chat_url") or "")
+        if not chat_url and isinstance(current, dict):
+            chat_url = str(current.get("chat_url") or "")
         row = {
-            "id": str(uuid.uuid4()),
+            "id": str(existing.get("id") or uuid.uuid4()),
             "name": product_name,
             "url": product_url,
             "detail": text,
-            "finder_verified": for_finder,
+            "finder_verified": bool(for_finder or existing.get("finder_verified")),
             "verified_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "x_username": username,
+            "x_password": password,
+            "x_handle": handle,
+            "chat_url": chat_url,
         }
         self.store.save_product(row)
-        prefs = self._raw_settings()
+        prefs["selected_product_id"] = row["id"]
         prefs["product_name"] = product_name
         prefs["product_url"] = product_url
         prefs["product_pitch"] = text[:2000]
@@ -906,10 +1118,10 @@ class Service:
             }
         )
         store_details(self._post_path(), saved)
-        return row
+        return self._public_product(row)
 
     def latest_product(self) -> dict[str, Any] | None:
-        return self.store.latest_product()
+        return self._public_product(self._selected_raw())
 
     def start_daily_post(self, user_input: str) -> dict[str, Any]:
         note = " ".join(user_input.split())
@@ -1006,8 +1218,19 @@ class Service:
         def progress(snapshot: dict[str, Any]) -> None:
             self.jobs.update(job["id"], result=snapshot, results_count=int(snapshot.get("replies_received") or 0))
 
-        self.jobs.log(job["id"], "Opening X.", progress=10)
+        product = self._selected_raw()
+        self.jobs.log(
+            job["id"],
+            f"Checking the X account for {product.get('name') or 'the selected product'}." if product else "Opening X.",
+            progress=10,
+        )
         with BrowserSession(self.settings) as session:
+            if product:
+                self._require_account(session, job, product)
+            else:
+                state = session.ensure_x(_cancelled(job), lambda message: self.jobs.log(job["id"], message, progress=15))
+                if state.status != "signed_in":
+                    raise RuntimeError(state.detail)
             return collect_activity(session, path, log, progress, _cancelled(job))
 
     def _draft_activity(self, job: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
@@ -1065,4 +1288,15 @@ class Service:
             safe = dict(settings)
             safe.pop("x_password", None)
             copied["settings"] = safe
+        products = copied.get("products")
+        if isinstance(products, list):
+            hidden = []
+            for item in products:
+                if isinstance(item, dict):
+                    safe_product = dict(item)
+                    safe_product.pop("x_password", None)
+                    hidden.append(safe_product)
+                else:
+                    hidden.append(item)
+            copied["products"] = hidden
         return copied

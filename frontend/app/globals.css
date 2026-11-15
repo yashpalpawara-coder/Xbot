@@ -50,7 +50,10 @@ button, input, textarea, select { font: inherit; color: inherit; }
   letter-spacing: -0.04em;
 }
 
-.nav { display: flex; flex-direction: column; gap: 6px; margin-top: 32px; }
+.product-pick { display: grid; gap: 8px; margin-top: 22px; }
+.product-note { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.product-note.bad { color: var(--bad); }
+.nav { display: flex; flex-direction: column; gap: 6px; margin-top: 22px; }
 
 .nav a {
   border-radius: 12px;

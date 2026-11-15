@@ -18,6 +18,7 @@ from playwright.sync_api import sync_playwright
 from app.config import Settings
 from app.grok_find import limit_reached
 from app.writer import is_preamble
+from app.x_account import same_account
 
 
 def x_login_refusal(payload: str) -> str:
@@ -310,6 +311,109 @@ class BrowserSession:
         href = link.get_attribute("href") or ""
         parts = [part for part in href.split("/") if part]
         return parts[0] if parts else ""
+
+    def use_x_account(
+        self,
+        username: str,
+        password: str,
+        handle: str,
+        wait: Callable[[], bool] | None = None,
+        notice: Callable[[str], None] | None = None,
+    ) -> SessionState:
+        """Sign out of whoever is open, then sign in as the product that was selected."""
+        page = self.open_x()
+        logged_in = self.x_logged_in(page)
+        current = self.x_handle(page) if logged_in else ""
+        if logged_in and same_account(current, username, handle):
+            message = f"Already signed in as @{current}."
+            if notice:
+                notice(message)
+            return SessionState("x", "signed_in", current, message)
+        if logged_in:
+            who = f"@{current}" if current else "the open account"
+            if notice:
+                notice(f"Signing out of {who}.")
+            self.sign_out_x(page)
+            page = self.open_x()
+            if self.x_logged_in(page):
+                still = self.x_handle(page)
+                if same_account(still, username, handle):
+                    message = f"Already signed in as @{still}."
+                    if notice:
+                        notice(message)
+                    return SessionState("x", "signed_in", still, message)
+                return SessionState(
+                    "x",
+                    "needs_manual",
+                    still or current,
+                    f"Could not sign out of {who}. Sign out in the Chrome window, then select the product again.",
+                )
+        if not str(username or "").strip() or not str(password or ""):
+            return SessionState(
+                "x",
+                "signed_out",
+                "",
+                "This product has no X login. Add the username and password in Settings, then select it again.",
+            )
+        label = str(handle or username).strip().lstrip("@")
+        if notice:
+            notice(f"Signing in as {label}.")
+        self.settings.x_username = str(username).strip()
+        self.settings.x_password = password
+        self.settings.x_handle = str(handle or "").strip().lstrip("@") or (
+            str(username).strip() if "@" not in str(username) else ""
+        )
+        return self.ensure_x(wait, notice)
+
+    def sign_out_x(self, page: Page) -> None:
+        """Leave the account that is currently open in this Chrome profile."""
+        if "/login" in (page.url or "") or "/i/flow/login" in (page.url or ""):
+            return
+        try:
+            switcher = page.locator('[data-testid="SideNav_AccountSwitcher_Button"]')
+            switcher.first.wait_for(state="visible", timeout=8_000)
+            switcher.first.click()
+            page.wait_for_timeout(500)
+            logout = page.locator('[data-testid="AccountSwitcher_Logout_Button"]')
+            if logout.count() == 0:
+                logout = page.get_by_role("menuitem", name=re.compile(r"log out", re.I))
+            if logout.count() == 0:
+                logout = page.get_by_text(re.compile(r"^log out", re.I))
+            logout.first.click()
+            page.wait_for_timeout(500)
+            confirm = page.locator('[data-testid="confirmationSheetConfirm"]')
+            if confirm.count() and confirm.first.is_visible():
+                confirm.first.click()
+            else:
+                button = page.get_by_role("button", name=re.compile(r"^log out$", re.I))
+                if button.count() and button.first.is_visible():
+                    button.first.click()
+        except Exception:
+            logging.getLogger(__name__).info("X menu logout did not finish")
+        if self._x_still_open(page):
+            try:
+                page.goto("https://x.com/logout", wait_until="domcontentloaded", timeout=45_000)
+                page.wait_for_timeout(800)
+                button = page.locator('[data-testid="confirmationSheetConfirm"]')
+                if button.count() == 0:
+                    button = page.get_by_role("button", name=re.compile(r"log out", re.I))
+                if button.count() and button.first.is_visible():
+                    button.first.click()
+            except Exception:
+                logging.getLogger(__name__).info("X logout page did not finish")
+        deadline = time.time() + 12
+        while time.time() < deadline and self._x_still_open(page):
+            page.wait_for_timeout(400)
+
+    def _x_still_open(self, page: Page) -> bool:
+        url = page.url or ""
+        if "/login" in url or "/i/flow/login" in url or url.rstrip("/").endswith("/logout"):
+            return False
+        locator = page.locator('[data-testid="SideNav_AccountSwitcher_Button"], [data-testid="AppTabBar_Profile_Link"]')
+        try:
+            return locator.count() > 0 and locator.first.is_visible()
+        except Exception:
+            return False
 
     def ensure_x(self, wait: Callable[[], bool] | None = None, notice: Callable[[str], None] | None = None) -> SessionState:
         page = self.open_x()
@@ -618,9 +722,22 @@ class BrowserSession:
         return SessionState("x", "needs_manual", "", detail)
 
     def chatgpt_logged_in(self, page: Page) -> bool:
+        if self._chatgpt_signed_out(page):
+            return False
         if self._chatgpt_composer(page) is not None:
             return True
         return self._chatgpt_shell(page)
+
+    def _chatgpt_signed_out(self, page: Page) -> bool:
+        """The logged-out home still shows New chat, so the login button is the real signal."""
+        for name in ("Log in", "Sign up for free"):
+            control = page.get_by_role("button", name=name).or_(page.get_by_role("link", name=name))
+            try:
+                if control.count() and control.first.is_visible():
+                    return True
+            except PlaywrightTimeout:
+                return False
+        return False
 
     def _chatgpt_shell(self, page: Page) -> bool:
         shell = page.get_by_role("link", name="New chat").or_(page.get_by_role("button", name="New chat"))
@@ -631,6 +748,8 @@ class BrowserSession:
 
     def _chatgpt_composer(self, page: Page):
         selectors = (
+            "#mobile-composer-prompt",
+            "textarea[placeholder='Ask ChatGPT']",
             "div.ProseMirror[role='textbox']",
             "#prompt-textarea",
             "div.ProseMirror[contenteditable='true']",
@@ -648,7 +767,7 @@ class BrowserSession:
                         return box
                 except PlaywrightTimeout:
                     continue
-        named = page.get_by_role("textbox", name=re.compile(r"Ask ChatGPT|Ask anything|Message", re.I))
+        named = page.get_by_role("textbox", name=re.compile(r"Ask ChatGPT|Ask anything|Message|Chat with ChatGPT|Where should we begin", re.I))
         try:
             if named.count() and named.first.is_visible():
                 return named.first
@@ -787,32 +906,14 @@ class BrowserSession:
     def ensure_chatgpt(self, wait: Callable[[], bool] | None = None) -> SessionState:
         page = self.open_chatgpt()
         page.wait_for_timeout(1500)
-        if self._chatgpt_composer(page) is not None:
+        if self.chatgpt_logged_in(page):
             return SessionState("chatgpt", "signed_in", "", "ChatGPT session is signed in.")
-        if self._chatgpt_shell(page):
-            if self._wait_until(lambda: self._chatgpt_composer(page) is not None, wait, seconds=20):
-                return SessionState("chatgpt", "signed_in", "", "ChatGPT session is signed in.")
-            return SessionState("chatgpt", "needs_manual", "", "ChatGPT is open, but the message box did not appear.")
         email = self.settings.chatgpt_email.strip()
         password = self.settings.chatgpt_password
         if not email or not password:
-            return SessionState("chatgpt", "signed_out", "", "ChatGPT is signed out. Sign in inside the Chrome window.")
+            return SessionState("chatgpt", "signed_out", "", "ChatGPT is signed out. Add the email and password, then check again.")
         try:
-            login = page.get_by_role("button", name="Log in").or_(page.get_by_role("link", name="Log in"))
-            if login.count():
-                login.first.click()
-                page.wait_for_timeout(1000)
-            email_box = page.locator('input[type="email"], input[name="email"]').first
-            email_box.wait_for(state="visible", timeout=15_000)
-            email_box.fill(email)
-            continue_button = page.get_by_role("button", name="Continue")
-            if continue_button.count():
-                continue_button.first.click()
-            password_box = page.locator('input[type="password"]').first
-            password_box.wait_for(state="visible", timeout=15_000)
-            password_box.fill(password)
-            submit = page.get_by_role("button", name="Continue").or_(page.get_by_role("button", name="Log in"))
-            submit.first.click()
+            self._submit_chatgpt_login(page, email, password)
         except PlaywrightTimeout:
             return self._wait_chatgpt(page, "Finish the ChatGPT sign-in prompt in the Chrome window.", wait)
         page.wait_for_timeout(2500)
@@ -820,7 +921,45 @@ class BrowserSession:
             return self._wait_chatgpt(page, "ChatGPT is asking for a code or extra check. Finish it in the Chrome window.", wait)
         if self.chatgpt_logged_in(page):
             return SessionState("chatgpt", "signed_in", "", "Signed in to ChatGPT.")
-        return self._wait_chatgpt(page, "ChatGPT did not show the composer. Finish sign-in in the Chrome window.", wait)
+        return self._wait_chatgpt(page, "ChatGPT did not finish signing in. Finish it in the Chrome window.", wait)
+
+    def _submit_chatgpt_login(self, page: Page, email: str, password: str) -> None:
+        login = page.get_by_role("button", name="Log in").or_(page.get_by_role("link", name="Log in"))
+        if login.count() and login.first.is_visible():
+            login.first.click()
+            page.wait_for_timeout(1200)
+        email_box = page.locator('input[type="email"], input[name="email"], input[name="username"]').first
+        email_box.wait_for(state="visible", timeout=20_000)
+        email_box.click()
+        email_box.fill(email)
+        self._click_auth_continue(page)
+        if not self._password_visible(page):
+            password_choice = page.get_by_role("button", name=re.compile(r"password", re.I)).or_(
+                page.get_by_role("link", name=re.compile(r"password", re.I))
+            )
+            if password_choice.count() and password_choice.first.is_visible():
+                password_choice.first.click()
+                page.wait_for_timeout(800)
+        password_box = page.locator('input[type="password"], input[name="password"]').first
+        password_box.wait_for(state="visible", timeout=20_000)
+        password_box.click()
+        password_box.fill(password)
+        self._click_auth_continue(page)
+
+    def _click_auth_continue(self, page: Page) -> None:
+        for name in ("Continue", "Log in", "Sign in"):
+            button = page.get_by_role("button", name=name, exact=True)
+            try:
+                if button.count() and button.first.is_visible():
+                    button.first.click()
+                    page.wait_for_timeout(1200)
+                    return
+            except PlaywrightTimeout:
+                return
+        submit = page.locator('button[type="submit"]')
+        if submit.count() and submit.first.is_visible():
+            submit.first.click()
+            page.wait_for_timeout(1200)
 
     def _wait_chatgpt(self, page: Page, detail: str, wait: Callable[[], bool] | None) -> SessionState:
         if not self._wait_until(lambda: self.chatgpt_logged_in(page), wait, tick=lambda: self._sync_remote(page)):

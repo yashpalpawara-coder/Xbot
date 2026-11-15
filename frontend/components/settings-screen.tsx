@@ -15,7 +15,15 @@ export function SettingsScreen({ supabase }: { supabase: { ok: boolean; detail: 
   const [xPassword, setXPassword] = useState("");
 
   useEffect(() => {
-    void request<{ settings: Settings }>("/api/settings").then((body) => setSettings(body.settings)).catch((exc: Error) => setError(exc.message));
+    function loadSettings() {
+      void request<{ settings: Settings }>("/api/settings").then((body) => setSettings(body.settings)).catch((exc: Error) => setError(exc.message));
+    }
+    loadSettings();
+    window.addEventListener("xbot-product", loadSettings);
+    return () => window.removeEventListener("xbot-product", loadSettings);
+  }, []);
+
+  useEffect(() => {
     void request<Health>("/api/health").then(setHealth).catch(() => undefined);
     const client = createClient();
     if (!client) {
@@ -73,13 +81,17 @@ export function SettingsScreen({ supabase }: { supabase: { ok: boolean; detail: 
         <p>Run supabase/schema.sql in the Supabase SQL editor if the tables are missing. The X password is saved on this computer and is not shown again.</p>
       </section>
       <form className="panel grid gap-4 p-5" onSubmit={onSubmit}>
-        <label className="block"><span className="label">X username or email</span>
+        <label className="block"><span className="label">X username or email{settings.selected_product_name ? ` for ${settings.selected_product_name}` : ""}</span>
           <input className="field" autoComplete="username" value={settings.x_username || ""} onChange={(event) => setSettings({ ...settings, x_username: event.target.value })} placeholder="name or email" />
         </label>
-        <label className="block"><span className="label">X password</span>
+        <label className="block"><span className="label">X password{settings.selected_product_name ? ` for ${settings.selected_product_name}` : ""}</span>
           <input className="field" type="password" autoComplete="current-password" value={xPassword} onChange={(event) => setXPassword(event.target.value)} placeholder={settings.x_password_set ? "Saved. Type a new one to replace it." : "Password"} />
         </label>
-        <p className="text-sm text-[var(--muted)]">Used when X is signed out.</p>
+        <p className="text-sm text-[var(--muted)]">
+          {settings.selected_product_name
+            ? `Saved for ${settings.selected_product_name}. Selecting that product signs out of the current X account and signs in with this login.`
+            : "Used when X is signed out."}
+        </p>
         <label className="block"><span className="label">Product name</span>
           <input className="field" value={settings.product_name} onChange={(event) => setSettings({ ...settings, product_name: event.target.value })} />
         </label>

@@ -71,6 +71,10 @@ class SavedIn(BaseModel):
     tags: list[str] = []
 
 
+class ProductSelectIn(BaseModel):
+    id: str = Field(min_length=8, max_length=80)
+
+
 class SettingsIn(BaseModel):
     product_name: str = Field(default="Ted", min_length=1, max_length=80)
     product_url: str = "https://tedcoachai.com"
@@ -81,6 +85,7 @@ class SettingsIn(BaseModel):
     min_likes: int | None = Field(default=None, ge=0)
     x_username: str = Field(default="", max_length=120)
     x_password: str = Field(default="", max_length=200)
+    selected_product_id: str = ""
 
 
 class AnalysisBody(BaseModel):

@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.browser_session import remote_click, remote_key, remote_screen, remote_type
 from app.errors import AppError
-from app.schemas import ApproveIn, CommentEdit, CommentGenerate, DailyApproveIn, DailyPostIn, GrokFindIn, ProductAnalyzeIn, ProductReviseIn, ProductVerifyIn, PublishIn, SavedIn, SearchIn, SettingsIn
+from app.schemas import ApproveIn, CommentEdit, CommentGenerate, DailyApproveIn, DailyPostIn, GrokFindIn, ProductAnalyzeIn, ProductReviseIn, ProductSelectIn, ProductVerifyIn, PublishIn, SavedIn, SearchIn, SettingsIn
 from app.state import get_state
 
 router = APIRouter(prefix="/api")
@@ -158,6 +158,16 @@ def draft_activity(response_id: str) -> dict[str, object]:
 @router.get("/post/today")
 def today_post() -> dict[str, object]:
     return get_state().service.daily_post_state()
+
+
+@router.get("/products")
+def list_products() -> dict[str, object]:
+    return get_state().service.list_products()
+
+
+@router.post("/products/select")
+def select_product(body: ProductSelectIn) -> dict[str, object]:
+    return get_state().service.select_product(body.id)
 
 
 @router.get("/product")
