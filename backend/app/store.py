@@ -32,6 +32,23 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _keep_latest_per_product(rows: list[dict[str, Any]], limit: int = 200) -> list[dict[str, Any]]:
+    """Each product keeps its own latest posts. One product's finds do not erase another's."""
+    kept: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for item in reversed(rows):
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("product_id") or "")
+        used = counts.get(key, 0)
+        if used >= limit:
+            continue
+        counts[key] = used + 1
+        kept.append(item)
+    kept.reverse()
+    return kept
+
+
 def _blank() -> dict[str, Any]:
     data: dict[str, Any] = {name: [] for name in TABLES}
     data["settings"] = None
@@ -87,9 +104,15 @@ class LocalStore:
             self._write(data)
         return row
 
-    def list_posts(self, limit: int = 100) -> list[dict[str, Any]]:
+    def list_posts(self, limit: int = 100, ids: list[str] | None = None) -> list[dict[str, Any]]:
         with self._lock:
             rows = list(self._read()["posts"])
+        if ids is not None:
+            wanted = set(ids)
+            rows = [item for item in rows if item.get("id") in wanted]
+            order = {post_id: index for index, post_id in enumerate(ids)}
+            rows.sort(key=lambda item: order.get(item.get("id"), 10**9))
+            return rows[:limit]
         rows.sort(key=lambda item: item.get("collected_at") or "", reverse=True)
         return rows[:limit]
 
@@ -303,7 +326,7 @@ class LocalStore:
                 known.add(key)
                 data["coming"].append(row)
                 added.append(row)
-            data["coming"] = data["coming"][-200:]
+            data["coming"] = _keep_latest_per_product(data["coming"])
             self._write(data)
         return added
 
@@ -333,6 +356,29 @@ class LocalStore:
             if changed:
                 self._write(data)
         return changed
+
+    def remember_post(self, post_id: str, product_id: str) -> None:
+        post_id = str(post_id or "")
+        product_id = str(product_id or "")
+        if not post_id or not product_id:
+            return
+        with self._lock:
+            data = self._read()
+            owners = data.get("post_owners")
+            if not isinstance(owners, dict):
+                owners = {}
+            owners[post_id] = product_id
+            if len(owners) > 1000:
+                owners = dict(list(owners.items())[-1000:])
+            data["post_owners"] = owners
+            self._write(data)
+
+    def post_ids_for(self, product_id: str) -> list[str]:
+        with self._lock:
+            owners = self._read().get("post_owners") or {}
+        if not isinstance(owners, dict):
+            return []
+        return [post_id for post_id, owner in owners.items() if str(owner) == str(product_id)]
 
     def list_coming(self, product_id: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
@@ -456,13 +502,18 @@ class SupabaseStore:
     def add_metric(self, row: dict[str, Any]) -> dict[str, Any]:
         return self._one(self._request("POST", "post_metrics", json_body=row))
 
-    def list_posts(self, limit: int = 100) -> list[dict[str, Any]]:
-        payload = self._request(
-            "GET",
-            "posts",
-            params={"select": "*", "order": "collected_at.desc", "limit": str(limit)},
-        )
-        return payload or []
+    def list_posts(self, limit: int = 100, ids: list[str] | None = None) -> list[dict[str, Any]]:
+        params: dict[str, str] = {"select": "*", "order": "collected_at.desc", "limit": str(limit)}
+        if ids is not None:
+            if not ids:
+                return []
+            params["id"] = "in.(" + ",".join(ids) + ")"
+            params["limit"] = str(len(ids))
+        payload = self._request("GET", "posts", params=params) or []
+        if ids is not None:
+            order = {post_id: index for index, post_id in enumerate(ids)}
+            payload.sort(key=lambda item: order.get(item.get("id"), 10**9))
+        return payload[:limit]
 
     def get_post(self, post_id: str) -> dict[str, Any] | None:
         payload = self._request("GET", "posts", params={"select": "*", "id": f"eq.{post_id}", "limit": "1"})
@@ -705,6 +756,12 @@ class Store:
 
     def add_coming(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return self.local.add_coming(rows)
+
+    def remember_post(self, post_id: str, product_id: str) -> None:
+        self.local.remember_post(post_id, product_id)
+
+    def post_ids_for(self, product_id: str) -> list[str]:
+        return self.local.post_ids_for(product_id)
 
     def claim_coming(self, product_id: str) -> int:
         return self.local.claim_coming(product_id)

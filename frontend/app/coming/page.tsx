@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 
 import { JobLog } from "@/components/post-card";
 import { request } from "@/lib/api";
-import type { ComingPost, Job, VerifiedProduct } from "@/lib/types";
+import type { ComingPost, Job } from "@/lib/types";
 import { useJob } from "@/lib/use-job";
 
 export default function ComingPage() {
@@ -19,12 +19,9 @@ export default function ComingPage() {
   }).length;
 
   async function load() {
-    const [body, productBody] = await Promise.all([
-      request<{ posts: ComingPost[] }>("/api/finder/coming"),
-      request<{ product: VerifiedProduct | null }>("/api/product"),
-    ]);
+    const body = await request<{ posts: ComingPost[]; product_name?: string }>("/api/finder/coming");
     setPosts(body.posts || []);
-    setProductName(productBody.product?.name || "");
+    setProductName(body.product_name || "");
   }
 
   useEffect(() => {
@@ -40,8 +37,11 @@ export default function ComingPage() {
     if (!job) return;
     if (job.status === "running") {
       const timer = window.setInterval(() => {
-        void request<{ posts: ComingPost[] }>("/api/finder/coming")
-          .then((body) => setPosts(body.posts || []))
+        void request<{ posts: ComingPost[]; product_name?: string }>("/api/finder/coming")
+          .then((body) => {
+            setPosts(body.posts || []);
+            setProductName(body.product_name || "");
+          })
           .catch(() => undefined);
       }, 2000);
       return () => window.clearInterval(timer);
@@ -68,11 +68,11 @@ export default function ComingPage() {
     <div className="space-y-6">
       <header>
         <p className="text-sm uppercase tracking-[0.16em] text-[var(--gold)]">Coming</p>
-        <h1 className="mt-2 font-[family-name:var(--font-serif)] text-5xl font-medium tracking-tight">Saved posts, then one reply each.</h1>
+        <h1 className="mt-2 font-[family-name:var(--font-serif)] text-5xl font-medium tracking-tight">{productName ? `${productName} posts` : "Saved posts"}</h1>
       </header>
       <section className="panel space-y-4 p-5">
         <p className="text-sm text-[var(--muted)]">
-          {productName ? `${productName}’s list. ` : ""}
+          {productName ? `${productName} has its own list. ` : ""}
           {posts.length} saved. {waiting} left. Replies use the saved analysis, then each post is liked, then the next one waits 30 seconds.
         </p>
         <div className="flex flex-wrap gap-2">
@@ -86,7 +86,7 @@ export default function ComingPage() {
         {error ? <p className="text-[var(--bad)]">{error}</p> : null}
         {job ? <JobLog message={job.message} progress={job.progress} logs={job.logs} error={job.error} /> : null}
       </section>
-      {posts.length === 0 ? <p className="text-[var(--muted)]">None yet. Find posts first.</p> : null}
+      {posts.length === 0 ? <p className="text-[var(--muted)]">{productName ? `None yet for ${productName}. Find posts first.` : "None yet. Find posts first."}</p> : null}
       <div className="space-y-3">
         {posts.map((post) => (
           <article key={post.id} className="panel space-y-3 p-5">

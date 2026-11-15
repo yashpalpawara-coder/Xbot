@@ -180,7 +180,8 @@ def test_each_product_has_its_own_coming_list_and_login(tmp_path, monkeypatch) -
         ]
     )
     listed = client.get("/api/finder/coming").json()["posts"]
-    assert {item["external_id"] for item in listed} == {"202", "303", "101"}
+    assert {item["external_id"] for item in listed} == {"202", "101"}
+    assert client.get("/api/finder/coming").json()["product_name"] == "Vimvo"
     raw = state.service._raw_settings()
     raw["selected_product_id"] = ted["id"]
     state.store.save_settings(raw)
@@ -205,6 +206,69 @@ def test_each_product_has_its_own_coming_list_and_login(tmp_path, monkeypatch) -
     menu = client.get("/api/products").json()
     assert {item["name"] for item in menu["products"]} == {"Ted", "Vimvo"}
     assert menu["selected_id"] == vim["id"]
+
+
+def test_each_product_shows_only_its_own_posts(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    ted_detail = "Ted is a Mac app. It asks for three tasks and is for people who work on a Mac."
+    vim_detail = "Vimvo is a voice app. It turns a spoken note into a short written post."
+    ted = _verify(client, tmp_path, "Ted", "https://tedcoachai.com", ted_detail, True)
+    vim = _verify(client, tmp_path, "Vimvo", "https://vimvo.example", vim_detail, True)
+    from app.state import get_state
+
+    state = get_state()
+    ted_post = {
+        "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "external_id": "1",
+        "author": "Ada",
+        "handle": "ada",
+        "text": "ted post",
+        "url": "https://x.com/a/status/1",
+        "language": "en",
+        "relevance": None,
+        "search_id": None,
+        "created_at": None,
+        "collected_at": "2026-11-15T00:00:00+00:00",
+        "latest_views": 1,
+        "latest_likes": None,
+        "latest_reposts": None,
+        "latest_replies": None,
+    }
+    vim_post = {**ted_post, "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "external_id": "2", "text": "vimvo post", "url": "https://x.com/b/status/2"}
+    state.store.upsert_post(ted_post)
+    state.store.upsert_post(vim_post)
+    state.store.add_coming(
+        [
+            {"id": "cccccccc-cccc-cccc-cccc-cccccccccccc", "external_id": "1", "post_id": ted_post["id"], "product_id": ted["id"], "url": ted_post["url"], "status": "saved"},
+            {"id": "dddddddd-dddd-dddd-dddd-dddddddddddd", "external_id": "2", "post_id": vim_post["id"], "product_id": vim["id"], "url": vim_post["url"], "status": "saved"},
+        ]
+    )
+    listed = client.get("/api/finder/posts").json()["posts"]
+    assert [item["text"] for item in listed] == ["vimvo post"]
+    assert client.get("/api/analytics/overview").json()["counts"]["posts"] == 1
+    raw = state.service._raw_settings()
+    raw["selected_product_id"] = ted["id"]
+    state.store.save_settings(raw)
+    listed = client.get("/api/finder/posts").json()["posts"]
+    assert [item["text"] for item in listed] == ["ted post"]
+    coming = client.get("/api/finder/coming").json()
+    assert coming["product_name"] == "Ted"
+    assert [item["external_id"] for item in coming["posts"]] == ["1"]
+    assert client.get("/api/analytics/overview").json()["product_name"] == "Ted"
+
+
+def test_a_long_list_for_one_product_keeps_the_other(tmp_path) -> None:
+    from app.store import LocalStore
+
+    store = LocalStore(tmp_path / "store.json")
+    rows = [
+        {"id": f"00000000-0000-0000-0000-{index:012d}", "external_id": f"t{index}", "product_id": "ted", "url": f"https://x.com/a/status/t{index}", "status": "saved"}
+        for index in range(201)
+    ]
+    rows.append({"id": "ffffffff-ffff-ffff-ffff-ffffffffffff", "external_id": "v1", "product_id": "vim", "url": "https://x.com/b/status/v1", "status": "saved"})
+    store.add_coming(rows)
+    assert len(store.list_coming("ted")) == 200
+    assert [item["external_id"] for item in store.list_coming("vim")] == ["v1"]
 
 
 def test_comments_use_the_saved_analysis_without_a_new_chat(tmp_path, monkeypatch) -> None:

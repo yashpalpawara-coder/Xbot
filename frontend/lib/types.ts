@@ -216,6 +216,7 @@ export type Overview = {
   };
   logs: { id: string; action: string; status: string; detail: string; created_at?: string }[];
   database: string;
+  product_name?: string;
 };
 
 export type SavedItem = {

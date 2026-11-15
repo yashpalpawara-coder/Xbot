@@ -74,7 +74,7 @@ def start_search(body: SearchIn) -> dict[str, object]:
 
 @router.get("/finder/coming")
 def list_coming() -> dict[str, object]:
-    return {"posts": get_state().service.list_coming()}
+    return get_state().service.list_coming()
 
 
 @router.post("/finder/grok")

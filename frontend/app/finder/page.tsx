@@ -132,6 +132,7 @@ function ProductFind() {
   const [changing, setChanging] = useState(false);
   const [change, setChange] = useState("");
   const [coming, setComing] = useState<ComingPost[]>([]);
+  const [listName, setListName] = useState("");
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -143,7 +144,7 @@ function ProductFind() {
     const [productBody, today, list, settingsBody] = await Promise.all([
       request<{ product: VerifiedProduct | null }>("/api/product"),
       request<DailyPostState>("/api/post/today"),
-      request<{ posts: ComingPost[] }>("/api/finder/coming"),
+      request<{ posts: ComingPost[]; product_name?: string }>("/api/finder/coming"),
       request<{ settings: Settings }>("/api/settings"),
     ]);
     const product = productBody.product;
@@ -157,6 +158,7 @@ function ProductFind() {
     setSavedDetail(product?.detail || "");
     setFinderVerified(Boolean(product?.finder_verified));
     setComing(list.posts || []);
+    setListName(list.product_name || product?.name || "");
   }
 
   useEffect(() => {
@@ -170,8 +172,11 @@ function ProductFind() {
 
   useEffect(() => {
     if (!job) return;
-    void request<{ posts: ComingPost[] }>("/api/finder/coming")
-      .then((list) => setComing(list.posts || []))
+    void request<{ posts: ComingPost[]; product_name?: string }>("/api/finder/coming")
+      .then((list) => {
+        setComing(list.posts || []);
+        if (list.product_name) setListName(list.product_name);
+      })
       .catch(() => undefined);
   }, [job]);
 
@@ -291,10 +296,10 @@ function ProductFind() {
       ) : null}
       <div>
         <div className="flex items-center justify-between">
-          <h3 className="text-lg">Coming posts</h3>
+          <h3 className="text-lg">{listName ? `${listName} posts` : "Coming posts"}</h3>
           <a className="text-sm text-[var(--gold)]" href="/coming">Open the coming panel</a>
         </div>
-        {coming.length === 0 ? <p className="mt-2 text-sm text-[var(--muted)]">None yet.</p> : null}
+        {coming.length === 0 ? <p className="mt-2 text-sm text-[var(--muted)]">{listName ? `None yet for ${listName}.` : "None yet."}</p> : null}
         <ul className="mt-2 space-y-2">
           {coming.map((post) => (
             <li key={post.id} className="rounded-2xl bg-[var(--paper)] p-3 text-sm">

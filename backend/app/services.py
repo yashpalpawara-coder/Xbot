@@ -122,10 +122,22 @@ class Service:
 
     def _coming_rows(self, product: dict[str, Any] | None) -> list[dict[str, Any]]:
         if not isinstance(product, dict) or not product.get("id"):
-            return self.store.list_coming()
-        product_id = str(product["id"])
-        self.store.claim_coming(product_id)
-        return self.store.list_coming(product_id)
+            return []
+        return self.store.list_coming(str(product["id"]))
+
+    def _product_post_ids(self, product_id: str) -> list[str]:
+        ids: list[str] = []
+        seen: set[str] = set()
+        for row in self.store.list_coming(product_id):
+            post_id = str(row.get("post_id") or "")
+            if post_id and post_id not in seen:
+                seen.add(post_id)
+                ids.append(post_id)
+        for post_id in self.store.post_ids_for(product_id):
+            if post_id not in seen:
+                seen.add(post_id)
+                ids.append(post_id)
+        return ids
 
     def _public_product(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(row, dict):
@@ -341,8 +353,13 @@ class Service:
             raise AppError("Add a topic, keyword, handle, or post URL.", 422, "invalid")
         return self.jobs.start("finder_search", lambda job: self._search(job, body, query))
 
-    def list_coming(self) -> list[dict[str, Any]]:
-        return self._coming_rows(self._selected_raw())
+    def list_coming(self) -> dict[str, Any]:
+        product = self._selected_raw()
+        return {
+            "posts": self._coming_rows(product),
+            "product_id": str((product or {}).get("id") or ""),
+            "product_name": str((product or {}).get("name") or ""),
+        }
 
     def start_grok_find(self, count: int = 20) -> dict[str, Any]:
         product = self._selected_raw()
@@ -408,6 +425,8 @@ class Service:
                     "latest_replies": None,
                 }
             )
+            if product_id:
+                self.store.remember_post(str(post.get("id") or ""), product_id)
             rows.append(
                 {
                     **item,
@@ -660,6 +679,9 @@ class Service:
                 "latest_replies": raw.get("replies"),
             }
             stored = self.store.upsert_post(row)
+            owner = self._selected_raw()
+            if isinstance(owner, dict) and owner.get("id"):
+                self.store.remember_post(str(stored.get("id") or ""), str(owner["id"]))
             self.store.add_metric(
                 {
                     "id": str(uuid.uuid4()),
@@ -696,7 +718,13 @@ class Service:
         return post.get("relevance") or 0
 
     def list_posts(self, limit: int = 50) -> list[dict[str, Any]]:
-        return self.store.list_posts(limit)
+        product = self._selected_raw()
+        if not isinstance(product, dict) or not product.get("id"):
+            return self.store.list_posts(limit)
+        ids = self._product_post_ids(str(product["id"]))
+        if not ids:
+            return []
+        return self.store.list_posts(limit, ids[:limit])
 
     def post_detail(self, post_id: str) -> dict[str, Any]:
         post = self.store.get_post(post_id)
@@ -1030,7 +1058,16 @@ class Service:
         return items
 
     def overview(self) -> dict[str, Any]:
-        return {"counts": self.store.counts(), "logs": self.store.list_logs(20), "database": self.store.mode}
+        product = self._selected_raw()
+        counts = dict(self.store.counts())
+        if isinstance(product, dict) and product.get("id"):
+            counts["posts"] = len(self._coming_rows(product))
+        return {
+            "counts": counts,
+            "logs": self.store.list_logs(20),
+            "database": self.store.mode,
+            "product_name": str((product or {}).get("name") or ""),
+        }
 
     def activity_snapshot(self) -> dict[str, Any]:
         path = self._activity_path()

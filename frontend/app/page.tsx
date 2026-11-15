@@ -39,6 +39,11 @@ export default function DashboardPage() {
 
   useEffect(() => {
     void load().catch((exc: Error) => setError(exc.message));
+    function onProduct() {
+      void load().catch((exc: Error) => setError(exc.message));
+    }
+    window.addEventListener("xbot-product", onProduct);
+    return () => window.removeEventListener("xbot-product", onProduct);
   }, []);
 
   useEffect(() => {
@@ -76,7 +81,7 @@ export default function DashboardPage() {
       ) : null}
 
       <section className="grid gap-3 md:grid-cols-4">
-        <Stat label="Discovered" value={counts?.posts ?? 0} />
+        <Stat label="Posts" value={counts?.posts ?? 0} />
         <Stat label="Analysed" value={counts?.analyses ?? 0} />
         <Stat label="Drafts" value={counts?.comments ?? 0} />
         <Stat label="Published" value={counts?.published ?? 0} />
@@ -108,10 +113,12 @@ export default function DashboardPage() {
       <section className="grid gap-4 lg:grid-cols-[1.1fr_.9fr]">
         <div className="space-y-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg">Recent posts</h2>
+            <h2 className="text-lg">{overview?.product_name ? `${overview.product_name} posts` : "Recent posts"}</h2>
             <Link href="/finder" className="text-sm text-[var(--gold)]">Finder</Link>
           </div>
-          {posts.length === 0 ? <p className="text-[var(--muted)]">No posts saved yet.</p> : posts.map((post) => <PostCard key={post.id} post={post} />)}
+          {posts.length === 0 ? (
+            <p className="text-[var(--muted)]">{overview?.product_name ? `No posts saved for ${overview.product_name} yet.` : "No posts saved yet."}</p>
+          ) : posts.map((post) => <PostCard key={post.id} post={post} />)}
         </div>
         <div className="panel p-5">
           <h2 className="text-lg">Recent jobs</h2>
