@@ -26,6 +26,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const [failed, setFailed] = useState(false);
   const job = useJob(jobId);
   const locked = job?.status === "running";
+  const shown = products.some((product) => product.id === selected) ? selected : products[0]?.id || "";
 
   async function load() {
     const body = await request<{ products: ProductChoice[]; selected_id: string }>("/api/products");
@@ -35,6 +36,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     void load().catch(() => undefined);
+    function onProduct() {
+      void load().catch(() => undefined);
+    }
+    window.addEventListener("xbot-product", onProduct);
+    return () => window.removeEventListener("xbot-product", onProduct);
   }, [path]);
 
   useEffect(() => {
@@ -71,20 +77,20 @@ export function Shell({ children }: { children: React.ReactNode }) {
       <aside className="side">
         <div className="brand">XBot</div>
         <p className="mt-3 text-sm text-[var(--muted)]">Find a post. Read it. Reply once, after you approve it.</p>
-        {products.length > 0 ? (
-          <label className="product-pick">
-            <span className="label">Product</span>
-            <select className="select" value={selected} disabled={locked} onChange={(event) => void choose(event.target.value)}>
-              {products.map((product) => (
-                <option key={product.id} value={product.id}>
-                  {product.name}
-                  {product.x_handle ? ` · @${product.x_handle.replace(/^@/, "")}` : ""}
-                </option>
-              ))}
-            </select>
-            {note ? <p className={failed ? "product-note bad" : "product-note"}>{note}</p> : null}
-          </label>
-        ) : null}
+        <label className="product-pick">
+          <span className="label">Product</span>
+          <select className="select" value={shown} disabled={locked || products.length === 0} onChange={(event) => void choose(event.target.value)}>
+            {products.length === 0 ? <option value="">No product saved</option> : null}
+            {products.map((product) => (
+              <option key={product.id} value={product.id}>
+                {product.name}
+                {product.x_handle ? ` · @${product.x_handle.replace(/^@/, "")}` : ""}
+              </option>
+            ))}
+          </select>
+          {products.length === 0 ? <p className="product-note">Verify a product on Analysis. It shows up here.</p> : null}
+          {note ? <p className={failed ? "product-note bad" : "product-note"}>{note}</p> : null}
+        </label>
         <nav className="nav">
           {links.map(([href, label]) => {
             const active = href === "/" ? path === "/" : path.startsWith(href);

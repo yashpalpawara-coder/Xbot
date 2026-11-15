@@ -53,7 +53,7 @@ class GrokFindIn(BaseModel):
 class ProductVerifyIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     url: str = Field(min_length=8, max_length=300)
-    detail: str = Field(min_length=20, max_length=8000)
+    detail: str = Field(min_length=20)
     for_finder: bool = False
 
 

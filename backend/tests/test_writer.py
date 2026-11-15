@@ -35,6 +35,40 @@ def test_close_copies_count_as_the_same_post() -> None:
     assert not repeats_post("A quiet notch list for the one thing still open tonight.", earlier)
 
 
+def test_chat_composer_outranks_the_small_ask_box() -> None:
+    from app.browser_session import composer_rank
+
+    prose = composer_rank("#prompt-textarea", 400 * 120, "")
+    ask = composer_rank("textarea[placeholder='Ask ChatGPT']", 80 * 20, "")
+    filled = composer_rank("#prompt-textarea", 400 * 120, "Analyze this product. Name: Vimvo")
+    assert prose > ask
+    assert filled > prose
+
+
+def test_typed_prompt_counts_when_blank_lines_were_added() -> None:
+    from app.browser_session import prompt_is_present
+
+    prompt = "Analyze this product.\nName: Vimvo\nURL: https://apps.apple.com/in/app/vimvo"
+    shown = "Analyze this product.\n\nName: Vimvo\n\nURL: \nhttps://apps.apple.com/in/app/vimvo"
+    assert prompt_is_present(shown, prompt)
+    assert not prompt_is_present("", prompt)
+
+
+def test_long_reply_still_needs_the_missing_sections() -> None:
+    from app.prompts import product_prompt
+    from app.writer import _analysis_incomplete
+
+    asked = product_prompt("Vimvo", "", "https://apps.apple.com/in/app/vimvo-60-day-reset-challenge/id6828568240")
+    partial = "What it is\nVimvo is a 60-day habit app.\nFeatures\nWeekly reviews and Apple Health.\n" + ("detail " * 80)
+    assert _analysis_incomplete(partial, asked)
+    finished = (
+        partial
+        + "\nTarget users\nAdults building routines.\nAudience type\nWellness.\n"
+        + "https://apps.apple.com/in/app/vimvo-60-day-reset-challenge/id6828568240\n"
+    )
+    assert not _analysis_incomplete(finished, asked)
+
+
 def test_opening_line_is_not_the_product_details() -> None:
     from app.writer import is_preamble
 
@@ -63,7 +97,13 @@ def test_compose_uses_the_saved_scan_and_stores_a_draft(tmp_path: Path) -> None:
         assert "Do not write an X post." in prompt
         assert "https://tedcoachai.com" in prompt
         assert "Name: Ted" in prompt
-        return "Ted is a Mac notch app. It asks for up to three tasks and is spoken by Ted, not by a customer."
+        return (
+            "What it is\nTed is a Mac notch app.\n"
+            "Features\nIt asks for up to three tasks and is spoken by Ted, not by a customer.\n"
+            "Target users\nPeople who want a short daily list.\n"
+            "Audience type\nMac users.\n"
+            "Use this URL when promoting Ted: https://tedcoachai.com\n"
+        )
 
     details = prepare_details(snapshot, name="Ted", url="https://tedcoachai.com", pitch="A Mac notch app.", complete=details_complete)
     assert "three tasks" in details["writeup"]

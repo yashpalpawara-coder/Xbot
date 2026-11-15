@@ -34,6 +34,17 @@ def test_search_requires_a_query(tmp_path, monkeypatch) -> None:
     assert "topic" in response.json()["error"]["message"].lower() or response.json()["error"]["code"] == "invalid"
 
 
+def test_saving_a_second_product_keeps_both_in_the_menu(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    first = client.put("/api/settings", json=_settings_body("Ted", "https://tedcoachai.com"))
+    assert first.status_code == 200
+    second = client.put("/api/settings", json=_settings_body("Vimvo", "https://apps.apple.com/in/app/vimvo"))
+    assert second.status_code == 200
+    menu = client.get("/api/products").json()
+    assert {item["name"] for item in menu["products"]} == {"Ted", "Vimvo"}
+    assert menu["selected_id"]
+
+
 def test_settings_round_trip(tmp_path, monkeypatch) -> None:
     client = _client(tmp_path, monkeypatch)
     saved = client.put(

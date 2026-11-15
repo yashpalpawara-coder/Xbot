@@ -196,6 +196,21 @@ def post_note(user_input: str, snapshot: dict[str, Any], earlier: list[str]) -> 
     return "\n".join(line for line in lines if line)
 
 
+def _analysis_incomplete(writeup: str, asked: str) -> bool:
+    body = writeup.strip()
+    if len(body) < 20 or " ".join(body.split()) == " ".join(asked.split()) or is_preamble(body):
+        return True
+    lowered = body.lower()
+    if any(section not in lowered for section in ("what it is", "features", "target users", "audience type")):
+        return True
+    url = ""
+    for line in asked.splitlines():
+        if line.lower().startswith("url:"):
+            url = line.split(":", 1)[1].strip()
+            break
+    return bool(url) and url not in body
+
+
 def is_preamble(text: str) -> bool:
     """ChatGPT's opening line. The product details come after it finishes reading."""
     body = " ".join(text.split())
@@ -222,10 +237,23 @@ def prepare_details(
     del snapshot
     asked = product_prompt(name, pitch, url)
     writeup = taken_comment(complete(asked)).strip()
-    if len(writeup) < 20 or " ".join(writeup.split()) == " ".join(asked.split()) or is_preamble(writeup):
+    if _analysis_incomplete(writeup, asked):
+        follow = (
+            "That reply did not finish the analysis. Write the full analysis in this reply now. "
+            "Do not say you will read it later.\n"
+            "Cover these sections, in this order:\n"
+            "What it is\n"
+            "Features\n"
+            "Target users\n"
+            "Audience type\n"
+            f"What to use when promoting {name.strip() or 'the product'}, including the name and this URL: {url.strip()}\n"
+            "Do not write an X post."
+        )
+        writeup = taken_comment(complete(follow)).strip()
+    if _analysis_incomplete(writeup, asked):
         raise RuntimeError("ChatGPT has not finished the product details.")
     return {
-        "writeup": writeup[:8000],
+        "writeup": writeup,
         "summary": " ".join(writeup.split())[:500],
         "name": name.strip(),
         "url": url.strip(),
@@ -248,7 +276,7 @@ def revise_details(
     if len(writeup) < 20 or is_preamble(writeup):
         raise RuntimeError("ChatGPT has not finished the revised details.")
     return {
-        "writeup": writeup[:8000],
+        "writeup": writeup,
         "summary": " ".join(writeup.split())[:500],
         "name": name.strip(),
         "url": url.strip(),

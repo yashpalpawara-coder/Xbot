@@ -238,21 +238,43 @@ class Service:
         existing = self._raw_settings()
         typed = str(payload.get("x_password") or "")
         payload["x_username"] = str(payload.get("x_username") or "").strip()
-        payload["selected_product_id"] = str(existing.get("selected_product_id") or "")
-        product = self.store.get_product(payload["selected_product_id"]) if payload["selected_product_id"] else None
-        if product is not None:
-            payload["x_password"] = typed or str(product.get("x_password") or "")
+        name = " ".join(str(payload.get("product_name") or "").split())
+        url = str(payload.get("product_url") or "").strip()
+        payload["product_name"] = name
+        payload["product_url"] = url
+        named = self.store.find_product(name, "") if name else None
+        if named is not None and " ".join(str(named.get("name") or "").split()).casefold() != name.casefold():
+            named = None
+        product = dict(named or {})
+        if name:
+            password = typed or str(product.get("x_password") or "")
+            if not product.get("id"):
+                password = typed
+            username = payload["x_username"] or str(product.get("x_username") or "")
+            handle = str(product.get("x_handle") or "")
+            if username and "@" not in username:
+                handle = username.lstrip("@")
+            row = {
+                "id": str(product.get("id") or uuid.uuid4()),
+                "name": name,
+                "url": url or str(product.get("url") or ""),
+                "detail": str(product.get("detail") or ""),
+                "finder_verified": bool(product.get("finder_verified")),
+                "verified_at": str(product.get("verified_at") or ""),
+                "x_username": username,
+                "x_password": password,
+                "x_handle": handle,
+                "chat_url": str(product.get("chat_url") or ""),
+            }
+            self.store.save_product(row)
+            payload["selected_product_id"] = row["id"]
+            payload["x_username"] = username
+            payload["x_password"] = password
         else:
+            payload["selected_product_id"] = str(existing.get("selected_product_id") or "")
             payload["x_password"] = typed or str(existing.get("x_password") or "")
         self.store.save_settings(payload)
-        if product is not None:
-            updated = dict(product)
-            updated["x_username"] = payload["x_username"]
-            updated["x_password"] = payload["x_password"]
-            if payload["x_username"] and "@" not in payload["x_username"]:
-                updated["x_handle"] = payload["x_username"].lstrip("@")
-            self.store.save_product(updated)
-        self.store.log("settings", "saved", str(payload.get("product_name") or ""))
+        self.store.log("settings", "saved", name)
         self._apply_x_login()
         return self.current_settings()
 
@@ -502,7 +524,7 @@ class Service:
                         ),
                         _cancelled(job),
                         "" if fresh_chat else chat_url,
-                        2,
+                        8,
                     )
                     chat_url, fresh_chat = self._keep_chat(session, product, chat_url, fresh_chat)
                     reply = taken_reply(raw)
@@ -513,7 +535,7 @@ class Service:
                             rewrite_reply_prompt(" ".join(problems), name=name, url=url),
                             _cancelled(job),
                             "" if fresh_chat else chat_url,
-                            2,
+                            8,
                         )
                         chat_url, fresh_chat = self._keep_chat(session, product, chat_url, fresh_chat)
                         reply = taken_reply(raw)
@@ -1139,12 +1161,26 @@ class Service:
         snapshot = load_activity(self._activity_path())
         self.jobs.log(job["id"], "Typing the product into ChatGPT.", progress=30)
         with BrowserSession(self.settings) as session:
+            sent = {"count": 0}
+
+            def complete(prompt: str) -> str:
+                sent["count"] += 1
+                chat = ""
+                if sent["count"] == 1:
+                    self.jobs.log(job["id"], "Waiting until ChatGPT finishes this reply.", progress=45)
+                else:
+                    self.jobs.log(job["id"], "The first reply is finished. Asking again in that chat.", progress=60)
+                    remembered = str(session.chatgpt_url or "")
+                    if remembered.startswith("https://chatgpt.com/c/"):
+                        chat = remembered
+                return self._complete(session, prompt, _cancelled(job), chat)
+
             details = prepare_details(
                 snapshot,
                 name=name,
                 url=url,
                 pitch="",
-                complete=lambda prompt: self._complete(session, prompt, _cancelled(job)),
+                complete=complete,
             )
             if session.chatgpt_url:
                 details["chat_url"] = session.chatgpt_url

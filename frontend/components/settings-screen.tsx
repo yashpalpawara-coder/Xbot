@@ -47,6 +47,7 @@ export function SettingsScreen({ supabase }: { supabase: { ok: boolean; detail: 
       setSettings(body.settings);
       setXPassword("");
       setMessage("Saved.");
+      window.dispatchEvent(new Event("xbot-product"));
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "Could not save");
     }

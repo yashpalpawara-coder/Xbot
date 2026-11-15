@@ -21,6 +21,25 @@ from app.writer import is_preamble
 from app.x_account import same_account
 
 
+def prompt_is_present(have: str, prompt: str) -> bool:
+    """True when the composer holds the prompt, even if blank lines were inserted."""
+    got = " ".join((have or "").split())
+    want = " ".join((prompt or "").split())
+    if len(want) < 12:
+        return False
+    return want[:60] in got
+
+
+def composer_rank(selector: str, area: float, text: str) -> float:
+    """Prefer the large chat composer over a tiny or hidden Ask box."""
+    score = area
+    if selector.startswith("#prompt") or "ProseMirror" in selector:
+        score += 5_000
+    if "Analyze this product" in text or len(" ".join(text.split())) > 40:
+        score += 50_000
+    return score
+
+
 def x_login_refusal(payload: str) -> str:
     lowered = payload.lower()
     if "temporarily limited your login" in lowered:
@@ -31,6 +50,7 @@ def x_login_refusal(payload: str) -> str:
 
 
 _TOOL_LINE = re.compile(r"^(Searched \d+ websites|Tested .+)$", re.I)
+_STATUS_LINE = re.compile(r"^(Thinking|Searching|Reasoning)(\.{3})?$", re.I)
 
 
 def _chatgpt_conversation(url: str) -> str:
@@ -748,43 +768,62 @@ class BrowserSession:
 
     def _chatgpt_composer(self, page: Page):
         selectors = (
+            "#prompt-textarea",
+            "div.ProseMirror[role='textbox']",
+            "div.ProseMirror[contenteditable='true']",
             "#mobile-composer-prompt",
             "textarea[placeholder='Ask ChatGPT']",
-            "div.ProseMirror[role='textbox']",
-            "#prompt-textarea",
-            "div.ProseMirror[contenteditable='true']",
         )
+        best = None
+        best_score = -1.0
         for selector in selectors:
             boxes = page.locator(selector)
             try:
                 count = min(boxes.count(), 6)
-            except PlaywrightTimeout:
+            except Exception:
                 continue
             for index in range(count):
                 box = boxes.nth(index)
                 try:
-                    if box.is_visible():
-                        return box
-                except PlaywrightTimeout:
+                    if not box.is_visible(timeout=800):
+                        continue
+                    rect = box.bounding_box(timeout=800) or {}
+                except Exception:
                     continue
+                area = float(rect.get("width") or 0) * float(rect.get("height") or 0)
+                if area < 40:
+                    continue
+                text = self._composer_text(box)
+                score = composer_rank(selector, area, text)
+                if score > best_score:
+                    best = box
+                    best_score = score
+        if best is not None:
+            return best
         named = page.get_by_role("textbox", name=re.compile(r"Ask ChatGPT|Ask anything|Message|Chat with ChatGPT|Where should we begin", re.I))
         try:
-            if named.count() and named.first.is_visible():
+            if named.count() and named.first.is_visible(timeout=800):
                 return named.first
-        except PlaywrightTimeout:
+        except Exception:
             return None
         return None
 
     def _composer_text(self, box) -> str:
         try:
-            rendered = box.inner_text() or ""
-        except PlaywrightTimeout:
+            rendered = box.inner_text(timeout=1_500) or ""
+        except Exception:
             rendered = ""
         if rendered.strip():
             return rendered
         try:
-            value = box.evaluate("el => el.value || el.innerText || ''")
-        except PlaywrightTimeout:
+            value = box.input_value(timeout=1_500)
+        except Exception:
+            value = ""
+        if str(value or "").strip():
+            return str(value)
+        try:
+            value = box.evaluate("el => el.value || el.innerText || ''", timeout=1_500)
+        except Exception:
             return rendered
         return str(value or rendered)
 
@@ -803,6 +842,8 @@ class BrowserSession:
                 continue
             page.wait_for_timeout(200)
             existing = self._composer_text(current).strip()
+            if prompt_is_present(existing, prompt):
+                return
             if existing:
                 try:
                     current.evaluate(
@@ -823,22 +864,26 @@ class BrowserSession:
                         pass
             page.keyboard.insert_text(prompt)
             self._notify_composer(current)
-            if self._wait_for_composer_text(current, needle):
+            if prompt_is_present(self._composer_text(current), prompt) or self._wait_for_composer_text(current, needle):
                 return
-            current.evaluate(
-                """(el, text) => {
-                  el.focus();
-                  const selection = window.getSelection();
-                  const range = document.createRange();
-                  range.selectNodeContents(el);
-                  selection.removeAllRanges();
-                  selection.addRange(range);
-                  document.execCommand('insertText', false, text);
-                }""",
-                prompt,
-            )
+            try:
+                current.evaluate(
+                    """(el, text) => {
+                      el.focus();
+                      const selection = window.getSelection();
+                      const range = document.createRange();
+                      range.selectNodeContents(el);
+                      selection.removeAllRanges();
+                      selection.addRange(range);
+                      document.execCommand('insertText', false, text);
+                    }""",
+                    prompt,
+                    timeout=2_000,
+                )
+            except Exception:
+                pass
             self._notify_composer(current)
-            if self._wait_for_composer_text(current, needle):
+            if prompt_is_present(self._composer_text(current), prompt) or self._wait_for_composer_text(current, needle):
                 return
             last = self._composer_text(current)[:80]
             page.wait_for_timeout(400)
@@ -862,23 +907,29 @@ class BrowserSession:
             return
 
     def _click_chatgpt_send(self, page: Page, box) -> None:
-        selector = 'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send"]'
+        selector = (
+            'button[data-testid="send-button"], button[data-testid="composer-submit-button"], '
+            'button[aria-label="Send prompt"], button[aria-label="Send message"], button[aria-label="Send"]'
+        )
         deadline = time.time() + 8
         nudged = False
         while time.time() < deadline:
-            buttons = page.locator(selector)
+            named = page.get_by_role("button", name=re.compile(r"^Send", re.I))
+            buttons = page.locator(selector).or_(named)
             try:
                 count = min(buttons.count(), 6)
-            except PlaywrightTimeout:
+            except Exception:
                 count = 0
             for index in range(count):
                 button = buttons.nth(index)
                 try:
-                    if button.is_visible() and not button.is_disabled():
-                        button.click()
+                    if button.is_visible(timeout=500) and not button.is_disabled(timeout=500):
+                        button.click(timeout=2_000)
                         return
-                except PlaywrightTimeout:
+                except Exception:
                     continue
+            if self._click_send_near_composer(page):
+                return
             if not nudged:
                 nudged = True
                 try:
@@ -890,7 +941,38 @@ class BrowserSession:
                 except Exception:
                     pass
             page.wait_for_timeout(400)
+        try:
+            page.screenshot(path=str(self.settings.profile_path.parent / "chatgpt-last.png"), full_page=False)
+        except Exception:
+            pass
         raise RuntimeError("ChatGPT left Send disabled. Nothing was sent.")
+
+    def _click_send_near_composer(self, page: Page) -> bool:
+        """Click the enabled Send control that sits in the same card as the composer."""
+        try:
+            return bool(
+                page.evaluate(
+                    """() => {
+                      const box = document.querySelector("#prompt-textarea, div.ProseMirror[role='textbox']");
+                      if (!box) return false;
+                      let node = box;
+                      for (let depth = 0; depth < 8 && node; depth += 1) {
+                        const send = [...node.querySelectorAll("button")].find((button) => {
+                          const label = (button.getAttribute("aria-label") || "") + " " + (button.getAttribute("data-testid") || "");
+                          return !button.disabled && /send/i.test(label);
+                        });
+                        if (send) {
+                          send.click();
+                          return true;
+                        }
+                        node = node.parentElement;
+                      }
+                      return false;
+                    }"""
+                )
+            )
+        except Exception:
+            return False
 
     def _wait_for_composer_text(self, box, needle: str) -> bool:
         deadline = time.time() + 3
@@ -1205,8 +1287,7 @@ class BrowserSession:
             if pinned:
                 raise RuntimeError("ChatGPT did not show the message box in the product chat.")
             raise RuntimeError("ChatGPT did not show the message box.")
-        if self._chatgpt_busy(page):
-            self._wait_until(lambda: not self._chatgpt_busy(page), cancelled, seconds=90)
+        self._wait_for_chatgpt_reply(page, cancelled)
         before = self._assistant_replies(page)
         self._write_chatgpt_prompt(page, box, prompt)
         self._click_chatgpt_send(page, box)
@@ -1422,7 +1503,7 @@ class BrowserSession:
     ) -> str:
         known = {" ".join(item.split()) for item in before}
         known.add(" ".join(prompt.split()))
-        deadline = time.time() + 150
+        deadline = time.time() + 240
         stable = ""
         stable_hits = 0
         while time.time() < deadline:
@@ -1432,25 +1513,73 @@ class BrowserSession:
             substantial = [
                 item
                 for item in replies
-                if len(item) >= 80 and not _TOOL_LINE.match(item.strip()) and not is_preamble(item)
+                if len(item) >= 80 and not _TOOL_LINE.match(item.strip()) and not _STATUS_LINE.match(item.strip()) and not is_preamble(item)
             ]
             current = substantial[-1] if substantial else ""
+            latest = replies[-1] if replies else ""
+            if _TOOL_LINE.match(latest.strip()) or _STATUS_LINE.match(latest.strip()):
+                latest = ""
+            tracked = current or latest
             # A search chip after the writeup means ChatGPT is still working.
             busy = self._chatgpt_busy(page) or bool(replies and current and replies[-1] != current)
-            if current and current == stable and not busy:
+            if tracked and tracked == stable and not busy:
                 stable_hits += 1
             else:
-                stable = current
+                stable = tracked
                 stable_hits = 0
-            if current and stable_hits >= max(1, settle) and not busy:
-                return current
+            if tracked and stable_hits >= max(1, settle) and not busy:
+                return tracked
             page.wait_for_timeout(1000)
-        if stable and " ".join(stable.split()) not in known and not is_preamble(stable):
+        if self._chatgpt_busy(page):
+            raise RuntimeError("ChatGPT has not finished the reply. The next message was not sent.")
+        if stable and " ".join(stable.split()) not in known:
             return stable
         raise RuntimeError("ChatGPT did not finish the product details.")
 
+    def _wait_for_chatgpt_reply(self, page: Page, cancelled: Callable[[], bool] | None) -> None:
+        """Do not type the next message while the previous reply is still being written."""
+        if not self._chatgpt_busy(page):
+            return
+        finished = self._wait_until(lambda: not self._chatgpt_busy(page), cancelled, seconds=240)
+        if cancelled and cancelled():
+            raise RuntimeError("Stopped while waiting for ChatGPT.")
+        if not finished or self._chatgpt_busy(page):
+            raise RuntimeError("ChatGPT is still writing the previous reply. The next message was not sent.")
+
     def _chatgpt_busy(self, page: Page) -> bool:
-        stop = page.locator('button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop"]')
+        """True while ChatGPT is still producing the current reply."""
+        try:
+            if page.evaluate(
+                """() => {
+                  const visible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    if (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) === 0) return false;
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 2 && rect.height > 2;
+                  };
+                  for (const button of document.querySelectorAll('button')) {
+                    const label = (button.getAttribute('aria-label') || '') + ' ' + (button.getAttribute('data-testid') || '');
+                    if (visible(button) && /stop/i.test(label)) return true;
+                  }
+                  if (document.querySelector('.result-streaming')) return true;
+                  const main = document.querySelector('main') || document.body;
+                  for (const node of main.querySelectorAll('span, div')) {
+                    if (node.childElementCount) continue;
+                    const text = (node.textContent || '').trim();
+                    if ((text === 'Thinking' || text === 'Searching') && visible(node)) return true;
+                  }
+                  return false;
+                }""",
+                timeout=3_000,
+            ):
+                return True
+        except Exception:
+            pass
+        stop = page.locator(
+            'button[data-testid="stop-button"], button[aria-label="Stop generating"], '
+            'button[aria-label="Stop streaming"], button[aria-label="Stop response"], button[aria-label="Stop"]'
+        )
         try:
             return stop.count() > 0 and stop.first.is_visible()
         except PlaywrightTimeout:
