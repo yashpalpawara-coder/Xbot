@@ -11,7 +11,26 @@ from pydantic import ValidationError
 from app.activity import collect_activity, load_activity, store_reply_draft
 from app.browser_session import BrowserSession, SessionState
 from app.errors import AppError
-from app.grok_find import batch_count, find_message, limit_reached, more_message, posts_from_reply, product_message
+from app.grok_find import (
+    CREATOR_COUNT,
+    LIMIT_NOTICE,
+    POSTS_PER_QUERY,
+    QUERY_COUNT,
+    QUERY_PAUSE_SECONDS,
+    SEARCH_SCAN,
+    VIEW_MIN,
+    batch_count,
+    creators_from_reply,
+    creators_message,
+    find_message,
+    limit_reached,
+    more_message,
+    over_view_threshold,
+    posts_from_reply,
+    product_message,
+    queries_from_reply,
+    search_queries_message,
+)
 from app.jobs import JobManager
 from app.prompts import analysis_prompt, comments_prompt, regenerate_prompt
 from app.reply_rules import reply_problems, reply_prompt, rewrite_reply_prompt, taken_reply
@@ -47,6 +66,12 @@ def _now() -> str:
 
 def _cancelled(job: dict[str, Any]) -> Callable[[], bool]:
     return job["cancel"].is_set
+
+
+def _query_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _product_fields(name: str, url: str) -> tuple[str, str]:
@@ -153,6 +178,8 @@ class Service:
             "x_handle": row.get("x_handle") or "",
             "x_password_set": bool(str(row.get("x_password") or "")),
             "chat_url": row.get("chat_url") or "",
+            "search_queries": _query_list(row.get("search_queries")),
+            "creators": _query_list(row.get("creators")),
         }
 
     def list_products(self) -> dict[str, Any]:
@@ -277,6 +304,8 @@ class Service:
                 "x_password": password,
                 "x_handle": handle,
                 "chat_url": str(product.get("chat_url") or ""),
+                "search_queries": _query_list(product.get("search_queries")),
+                "creators": _query_list(product.get("creators")),
             }
             self.store.save_product(row)
             payload["selected_product_id"] = row["id"]
@@ -373,30 +402,218 @@ class Service:
     def _grok_find(self, job: dict[str, Any], product: dict[str, Any], count: int = 20) -> dict[str, Any]:
         seen = {str(row.get("external_id") or "") for row in self._coming_rows(product)}
         added = 0
+        queries: list[str] = []
+        creators: list[str] = []
         with BrowserSession(self.settings) as session:
             self._require_account(session, job, product)
             self.jobs.log(job["id"], "Telling Grok the product. No search yet.", progress=15)
-            session.ask_grok(
+            intro, limited = self._grok_reply(
+                session,
+                job,
                 product_message(str(product.get("name") or ""), str(product.get("url") or ""), str(product.get("detail") or "")),
-                _cancelled(job),
             )
             if _cancelled(job)():
-                return {"added": added}
+                return {"added": added, "queries": queries, "creators": creators}
             chat = session.grok_url
-            self.jobs.log(job["id"], f"Asking Grok for {count} posts.", progress=30)
-            reply = session.ask_grok(find_message(count), _cancelled(job), chat_url=chat, expect_posts=True)
-            added += self._save_grok_posts(reply, seen, str(product.get("id") or ""))
+            reply = intro
+            if not limited:
+                self.jobs.log(job["id"], f"Asking Grok for {count} posts.", progress=30)
+                reply, limited = self._grok_reply(session, job, find_message(count), chat_url=chat, expect_posts=True)
+                added += self._save_grok_posts(reply, seen, str(product.get("id") or ""))
+                limited = limited or limit_reached(reply)
             for round_index in range(7):
-                if _cancelled(job)() or limit_reached(reply):
+                if _cancelled(job)() or limited:
                     break
                 self.jobs.log(job["id"], f"Asking Grok for {count} more.", progress=40 + round_index * 8)
-                reply = session.ask_grok(more_message(count), _cancelled(job), chat_url=session.grok_url or chat, expect_posts=True)
+                reply, hit_limit = self._grok_reply(
+                    session,
+                    job,
+                    more_message(count),
+                    chat_url=session.grok_url or chat,
+                    expect_posts=True,
+                )
                 fresh = self._save_grok_posts(reply, seen, str(product.get("id") or ""))
                 added += fresh
-                if fresh == 0 or limit_reached(reply):
+                if hit_limit or limit_reached(reply):
+                    limited = True
                     break
-        self.jobs.update(job["id"], message=f"{added} posts added to the coming list.", progress=100)
-        return {"added": added}
+                if fresh == 0:
+                    break
+            if limited and not _cancelled(job)():
+                found, queries, creators = self._find_with_search_queries(session, job, product, seen)
+                added += found
+        message = f"{added} posts added to the coming list."
+        if queries:
+            message = f"{added} posts added from {len(queries)} searches and {len(creators)} creators."
+        self.jobs.update(job["id"], message=message, progress=100, results_count=added)
+        return {"added": added, "queries": queries, "creators": creators}
+
+    def _find_with_search_queries(
+        self,
+        session: BrowserSession,
+        job: dict[str, Any],
+        product: dict[str, Any],
+        seen: set[str],
+    ) -> tuple[int, list[str], list[str]]:
+        """Grok is out of searches. ChatGPT analyses the product, then writes the queries."""
+        self.jobs.log(job["id"], "Grok limit reached. Asking ChatGPT for the full product analysis.", progress=70)
+        name = str(product.get("name") or "")
+        url = str(product.get("url") or "")
+        detail = str(product.get("detail") or "")
+        chat_url = str(product.get("chat_url") or "")
+        if not chat_url.startswith("https://chatgpt.com/c/"):
+            saved = public_state(self._post_path()).get("details")
+            if isinstance(saved, dict) and str(saved.get("name") or "").strip().casefold() == name.casefold():
+                maybe = str(saved.get("chat_url") or "")
+                if maybe.startswith("https://chatgpt.com/c/"):
+                    chat_url = maybe
+        fresh_chat = not chat_url.startswith("https://chatgpt.com/c/")
+
+        def complete(prompt: str) -> str:
+            nonlocal chat_url, fresh_chat
+            raw_reply = self._complete(session, prompt, _cancelled(job), "" if fresh_chat else chat_url, 8)
+            chat_url, fresh_chat = self._keep_chat(session, product, chat_url, fresh_chat)
+            return raw_reply
+
+        analysis = prepare_details({}, name=name, url=url, pitch=detail, complete=complete)
+        writeup = str(analysis.get("writeup") or detail)
+        self.jobs.log(job["id"], f"Asking ChatGPT for {CREATOR_COUNT} creators.", progress=72)
+        creators = creators_from_reply(complete(creators_message(name, url, writeup)), CREATOR_COUNT)
+        self.jobs.log(job["id"], f"Asking ChatGPT for {QUERY_COUNT} search queries.", progress=74)
+        raw = complete(search_queries_message(name, url, writeup))
+        queries = queries_from_reply(raw, QUERY_COUNT)
+        if not queries and not creators:
+            self.jobs.log(job["id"], "ChatGPT did not return search queries.")
+            return 0, [], []
+        self._remember_queries(product, queries, creators)
+        self.jobs.log(job["id"], f"Saved {len(creators)} creators and {len(queries)} search queries.", progress=75)
+        targets = [(query, "query") for query in queries]
+        targets.extend((f"from:{handle}", "creator") for handle in creators)
+        added = 0
+        product_id = str(product.get("id") or "")
+        total = len(targets)
+        for index, (query, kind) in enumerate(targets):
+            if _cancelled(job)():
+                break
+            label = f"Query {index + 1} of {len(queries)}" if kind == "query" else f"Creator {index - len(queries) + 1} of {len(creators)}"
+            self.jobs.log(job["id"], f"{label}: {query}", progress=75 + int(20 * index / max(total, 1)))
+            search_id = str(uuid.uuid4())
+            self.store.upsert_search(
+                {
+                    "id": search_id,
+                    "query": query,
+                    "filters": {"topic": query, "limit": POSTS_PER_QUERY, "source": kind, "min_views": VIEW_MIN},
+                    "created_at": _now(),
+                }
+            )
+            try:
+                raw_posts = session.search_posts(query, SEARCH_SCAN, _cancelled(job))
+            except RuntimeError as exc:
+                self.jobs.log(job["id"], str(exc))
+                raw_posts = []
+            kept = [item for item in raw_posts if over_view_threshold(item.get("views"))][:POSTS_PER_QUERY]
+            fresh = self._save_search_posts(kept, seen, product_id, search_id)
+            added += fresh
+            self.jobs.log(job["id"], f"Added {fresh} post from this search.")
+            if index < total - 1 and self._wait_before_next_query(job):
+                break
+        return added, queries, creators
+
+    def _grok_reply(
+        self,
+        session: BrowserSession,
+        job: dict[str, Any],
+        prompt: str,
+        chat_url: str = "",
+        expect_posts: bool = False,
+    ) -> tuple[str, bool]:
+        """A Grok reply. The daily-limit banner, or a reply that never arrives, switches to ChatGPT."""
+        try:
+            reply = session.ask_grok(prompt, _cancelled(job), chat_url=chat_url, expect_posts=expect_posts)
+        except RuntimeError as exc:
+            text = str(exc)
+            if limit_reached(text) or "did not finish a reply" in text.lower():
+                self.jobs.log(job["id"], "Grok limit reached.")
+                return LIMIT_NOTICE, True
+            raise
+        return reply, limit_reached(reply)
+
+    def _remember_queries(self, product: dict[str, Any], queries: list[str], creators: list[str]) -> None:
+        current = dict(self.store.get_product(str(product.get("id") or "")) or product)
+        current["search_queries"] = queries
+        current["creators"] = creators
+        self.store.save_product(current)
+        product["search_queries"] = queries
+        product["creators"] = creators
+        self.store.log("finder", "queries", "\n".join([*creators, *queries])[:4000])
+
+    def _wait_before_next_query(self, job: dict[str, Any]) -> bool:
+        """True when the job was stopped during the break between queries."""
+        self.jobs.log(job["id"], "Waiting 5 seconds before the next query.")
+        for _ in range(QUERY_PAUSE_SECONDS):
+            if _cancelled(job)():
+                return True
+            time.sleep(1)
+        return _cancelled(job)()
+
+    def _save_search_posts(self, raw_posts: list[dict[str, Any]], seen: set[str], product_id: str, search_id: str) -> int:
+        now = _now()
+        rows: list[dict[str, Any]] = []
+        for raw in raw_posts:
+            key = str(raw.get("external_id") or "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            text = str(raw.get("text") or "")
+            stored = self.store.upsert_post(
+                {
+                    "id": str(uuid.uuid4()),
+                    "external_id": key,
+                    "author": raw.get("author") or "",
+                    "handle": raw.get("handle") or "",
+                    "text": text,
+                    "url": raw.get("url") or "",
+                    "language": guess_language(text),
+                    "relevance": None,
+                    "search_id": search_id,
+                    "created_at": raw.get("created_at"),
+                    "collected_at": now,
+                    "latest_views": raw.get("views"),
+                    "latest_likes": raw.get("likes"),
+                    "latest_reposts": raw.get("reposts"),
+                    "latest_replies": raw.get("replies"),
+                }
+            )
+            if product_id:
+                self.store.remember_post(str(stored.get("id") or ""), product_id)
+            self.store.add_metric(
+                {
+                    "id": str(uuid.uuid4()),
+                    "post_id": stored["id"],
+                    "views": raw.get("views"),
+                    "likes": raw.get("likes"),
+                    "reposts": raw.get("reposts"),
+                    "replies": raw.get("replies"),
+                    "collected_at": now,
+                }
+            )
+            rows.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "external_id": key,
+                    "handle": str(raw.get("handle") or ""),
+                    "url": str(raw.get("url") or ""),
+                    "note": " ".join(text.split())[:300],
+                    "views": raw.get("views"),
+                    "post_id": stored["id"],
+                    "status": "saved",
+                    "reply": "",
+                    "comment_id": None,
+                    "product_id": product_id,
+                    "added_at": now,
+                }
+            )
+        return len(self.store.add_coming(rows))
 
     def _save_grok_posts(self, reply: str, seen: set[str], product_id: str = "") -> int:
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -723,7 +940,7 @@ class Service:
             return self.store.list_posts(limit)
         ids = self._product_post_ids(str(product["id"]))
         if not ids:
-            return []
+            return self.store.list_posts(limit)
         return self.store.list_posts(limit, ids[:limit])
 
     def post_detail(self, post_id: str) -> dict[str, Any]:
@@ -1060,8 +1277,9 @@ class Service:
     def overview(self) -> dict[str, Any]:
         product = self._selected_raw()
         counts = dict(self.store.counts())
-        if isinstance(product, dict) and product.get("id"):
-            counts["posts"] = len(self._coming_rows(product))
+        owned = self._coming_rows(product)
+        if owned:
+            counts["posts"] = len(owned)
         return {
             "counts": counts,
             "logs": self.store.list_logs(20),
@@ -1157,6 +1375,8 @@ class Service:
             "x_password": password,
             "x_handle": handle,
             "chat_url": chat_url,
+            "search_queries": _query_list(existing.get("search_queries")),
+            "creators": _query_list(existing.get("creators")),
         }
         self.store.save_product(row)
         prefs["selected_product_id"] = row["id"]

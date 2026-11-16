@@ -31,6 +31,8 @@ def comments_prompt(post: dict, analysis: dict | None, *, allow_promotion: bool,
         'Keys: should_reply (boolean), reason (string), natural, insightful, question.',
         "natural is conversational. insightful adds one concrete observation. question asks one answerable question.",
         "Stay on the post. Do not invent personal experience, results, or sources.",
+        "The reply must still be interesting if the account name is hidden.",
+        "Mention one concrete detail, then one insight about the author's actual problem. Do not lead with a feature or a download.",
         "Do not use generic praise. Avoid repeating the same opening.",
         "Each reply must stay within 280 characters. A URL counts as 23 characters.",
         "If the post is a poor fit, set should_reply to false, explain why, and leave the three replies empty.",
@@ -41,8 +43,9 @@ def comments_prompt(post: dict, analysis: dict | None, *, allow_promotion: bool,
         lines.append(f"Analysis: {analysis.get('key_message') or ''} Reply angle: {analysis.get('reply_angle') or ''}")
     if allow_promotion:
         lines.append(
-            f"A short mention of {product_name} is allowed only when one saved fact fits the author's actual point. "
-            f"The link {product_url} is optional. Do not end every reply with it. If it does not fit, mention nothing."
+            f"Mention {product_name} only when one saved fact answers the author's actual point. "
+            "Most replies should mention nothing. Do not add a download line or a link. "
+            f"Do not use {product_url}."
         )
         facts = product_pitch.strip()
         if facts:

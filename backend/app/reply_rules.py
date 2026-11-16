@@ -19,8 +19,9 @@ _EMOJI = re.compile(
     "]"
 )
 _LABEL = re.compile(r"^(plain text|text|markdown|code)\b[:\s-]*", re.I)
-_GENERIC = ("great post", "nice work", "love this", "so true", "well said")
+_GENERIC = ("great post", "nice work", "love this", "so true", "well said", "amazing post")
 _URL = re.compile(r"https?://\S+")
+_PITCH = ("download ", "download now", "link in bio", "sign up", "check it out")
 
 
 def reply_prompt(post_text: str, post_url: str, *, name: str, url: str, analysis: str = "") -> str:
@@ -40,13 +41,16 @@ def reply_prompt(post_text: str, post_url: str, *, name: str, url: str, analysis
         f"The post says: {post_text.strip()}\n"
         f"{context}"
         f"Write one reply that {who} can post under that same post.\n"
-        f"You are {who}. The account is {who}, so speak as {who} in first person. \"I\" means {who}. "
+        "The reply must still be interesting if the account name is hidden.\n"
+        "Mention one concrete detail from the post, then add one insight about the problem the author is actually talking about.\n"
+        "Start from the problem, not from a feature. Do not write an advertisement.\n"
+        "Do not use generic praise such as \"Great post\" or \"Amazing\".\n"
+        f"Mention {who} only when one saved fact answers the author's actual point. "
+        f"If you mention {who}, you are {who}. \"I\" means {who}. "
         f"Never write as a user of {who}. Do not say \"I use {who}\", \"I've been using {who}\", "
         f"\"I found {who}\", or \"I love {who}\".\n"
-        "Use a natural tone and mention one concrete detail from the post.\n"
-        f"Say what {who} does, once, as {who} talking about itself.\n"
-        "Use only the product in this chat. Do not invent a platform, a feature, or another product.\n"
-        f"Use one emoji. End with this URL and put the URL nowhere else: {link}\n"
+        "Most replies should not mention the product at all.\n"
+        f"Do not add a link, including {link}. Do not say download. Do not add a hashtag.\n"
         "Put only the finished reply in one code block, so the copy box contains the reply and nothing else."
     )
 
@@ -57,9 +61,9 @@ def rewrite_reply_prompt(problem: str, *, name: str, url: str) -> str:
         "Write that reply again in the same chat. Do not explain it.\n"
         f"Still needed: {problem.strip()}\n"
         f"You are {who}. \"I\" means {who}. Never write as a user of {who}.\n"
-        "Mention one concrete detail from the post. Say what you do, once.\n"
-        "Use only the product in this chat. Do not invent a platform, a feature, or another product.\n"
-        f"Use one emoji. End with this URL and put the URL nowhere else: {url.strip()}\n"
+        "Mention one concrete detail from the post, then one insight. Do not write an advertisement.\n"
+        f"Mention {who} only when one saved fact answers the author's point. Most replies should not mention it.\n"
+        f"Do not add a link, including {url.strip()}. Do not say download. Do not add a hashtag.\n"
         "Put only the finished reply in one code block."
     )
 
@@ -78,18 +82,19 @@ def reply_problems(text: str, *, name: str, url: str, post_text: str = "") -> li
         return ["Reply is empty."]
     if _HASHTAG.search(body):
         problems.append("Reply has a hashtag.")
-    if any(phrase in body.lower() for phrase in _GENERIC):
+    lowered = body.lower()
+    if any(phrase in lowered for phrase in _GENERIC):
         problems.append("Reply is generic praise.")
+    if any(phrase in lowered for phrase in _PITCH) or _URL.search(body):
+        problems.append("Reply is a download pitch.")
     product = name.strip()
-    if product and product.lower() not in body.lower():
-        problems.append("Reply does not name the product.")
-    if re.search(rf"\bi (?:use|used|found|love|am using|have been using|'ve been using|’ve been using) {re.escape(product)}\b", body, re.I):
+    if product and re.search(
+        rf"\bi (?:use|used|found|love|am using|have been using|'ve been using|’ve been using) {re.escape(product)}\b",
+        body,
+        re.I,
+    ):
         problems.append("Reply speaks as a user of the product.")
-    link = url.strip().rstrip("/")
-    if link and body.lower().count(link.lower()) != 1:
-        problems.append("Reply must contain the product URL exactly once.")
-    if not _EMOJI.search(body):
-        problems.append("Reply has no emoji.")
+    del url
     substance = _URL.sub("", body)
     substance = _EMOJI.sub("", substance)
     if len("".join(ch for ch in substance if ch.isalnum())) < 20:

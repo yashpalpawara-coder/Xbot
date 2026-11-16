@@ -16,7 +16,7 @@ from playwright.sync_api import BrowserContext, Page, Playwright, TimeoutError a
 from playwright.sync_api import sync_playwright
 
 from app.config import Settings
-from app.grok_find import limit_reached
+from app.grok_find import LIMIT_NOTICE, limit_reached, limit_reply
 from app.writer import is_preamble
 from app.x_account import same_account
 
@@ -1312,13 +1312,19 @@ class BrowserSession:
             page.wait_for_timeout(1200)
         elif "/grok" not in (page.url or ""):
             page = self.open_grok()
+        if self._grok_limited(page):
+            return LIMIT_NOTICE
         box = self._wait_grok_composer(page, cancelled)
+        if self._grok_limited(page):
+            return LIMIT_NOTICE
         if box is None:
             snippet = self._page_snippet(page)
             detail = f" X showed: {snippet}" if snippet else ""
             raise RuntimeError(f"Grok did not show the message box inside X.{detail}")
         if self._grok_busy(page):
             self._wait_until(lambda: not self._grok_busy(page), cancelled, seconds=120)
+        if self._grok_limited(page):
+            return LIMIT_NOTICE
         self._write_chatgpt_prompt(page, box, prompt)
         self._send_grok(page, box)
         answer = self._read_grok(page, prompt, cancelled, expect_posts)
@@ -1425,6 +1431,46 @@ class BrowserSession:
         except PlaywrightTimeout:
             return ""
 
+    def _grok_surface_text(self, page: Page) -> str:
+        """The Grok column plus the limit banner, including text inside an open shadow root."""
+        script = """() => {
+          const parts = [];
+          const visit = (node) => {
+            if (!node) return;
+            if (node.shadowRoot) visit(node.shadowRoot);
+            if (node.nodeType === Node.TEXT_NODE) {
+              const text = node.textContent || '';
+              if (text.trim()) parts.push(text);
+              return;
+            }
+            for (const child of node.childNodes || []) visit(child);
+          };
+          visit(document.body);
+          return parts.join('\\n');
+        }"""
+        chunks: list[str] = []
+        surfaces = [page, *[frame for frame in page.frames if frame != page.main_frame]]
+        for surface in surfaces:
+            try:
+                chunks.append(str(surface.evaluate(script) or ""))
+            except Exception:
+                continue
+        return "\n".join(chunk for chunk in chunks if chunk)
+
+    def _grok_limited(self, page: Page) -> bool:
+        if limit_reached(self._grok_surface_text(page)):
+            return True
+        surfaces = [page, *[frame for frame in page.frames if frame != page.main_frame]]
+        for surface in surfaces:
+            for label in ("limit reached", "daily limit", "free tier limit"):
+                try:
+                    banner = surface.get_by_text(label, exact=False)
+                    if banner.count() and banner.first.is_visible():
+                        return True
+                except Exception:
+                    continue
+        return False
+
     def _read_grok(
         self,
         page: Page,
@@ -1440,9 +1486,12 @@ class BrowserSession:
         while time.time() < deadline:
             if cancelled and cancelled():
                 raise RuntimeError("Stopped.")
-            current = self._page_text(page)
+            current = self._grok_surface_text(page)
             fresh = current.rsplit(needle, 1)[-1].strip() if needle and needle in current else ""
-            has_posts = "/status/" in fresh or limit_reached(fresh)
+            noticed = limit_reply(fresh, current)
+            if limit_reached(noticed):
+                return noticed
+            has_posts = "/status/" in fresh
             settled = len(fresh) >= 40 and fresh == last and not self._grok_busy(page)
             if expect_posts and not has_posts:
                 settled = False
@@ -1456,6 +1505,8 @@ class BrowserSession:
             page.wait_for_timeout(1000)
         if last and (not expect_posts or "/status/" in last or limit_reached(last)):
             return last
+        if self._grok_limited(page):
+            return LIMIT_NOTICE
         raise RuntimeError("Grok did not finish a reply.")
 
     def _remember_chat(self, page: Page) -> None:

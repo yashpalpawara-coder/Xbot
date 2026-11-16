@@ -137,6 +137,8 @@ function ProductFind() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [batch, setBatch] = useState("20");
+  const [queries, setQueries] = useState<string[]>([]);
+  const [creators, setCreators] = useState<string[]>([]);
   const job = useJob(jobId);
   const ready = finderVerified && detail.trim() !== "" && detail.trim() === savedDetail.trim();
 
@@ -159,6 +161,8 @@ function ProductFind() {
     setFinderVerified(Boolean(product?.finder_verified));
     setComing(list.posts || []);
     setListName(list.product_name || product?.name || "");
+    setQueries(product?.search_queries || []);
+    setCreators(product?.creators || []);
   }
 
   useEffect(() => {
@@ -169,6 +173,13 @@ function ProductFind() {
     window.addEventListener("xbot-product", onProduct);
     return () => window.removeEventListener("xbot-product", onProduct);
   }, []);
+
+  useEffect(() => {
+    const next = job?.result?.queries;
+    if (next && next.length > 0) setQueries(next);
+    const foundCreators = job?.result?.creators;
+    if (foundCreators && foundCreators.length > 0) setCreators(foundCreators);
+  }, [job]);
 
   useEffect(() => {
     if (!job) return;
@@ -293,6 +304,26 @@ function ProductFind() {
       {error ? <p className="text-[var(--bad)]">{error}</p> : null}
       {job?.type === "grok_find" || job?.type === "post_details" ? (
         <JobLog message={job.message} progress={job.progress} logs={job.logs} error={job.error} />
+      ) : null}
+      {creators.length > 0 ? (
+        <div>
+          <h3 className="text-lg">Saved creators</h3>
+          <ol className="mt-2 max-h-48 list-decimal space-y-1 overflow-auto pl-5 text-sm text-[var(--muted)]">
+            {creators.map((creator) => (
+              <li key={creator}>@{creator}</li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
+      {queries.length > 0 ? (
+        <div>
+          <h3 className="text-lg">Saved search queries</h3>
+          <ol className="mt-2 max-h-48 list-decimal space-y-1 overflow-auto pl-5 text-sm text-[var(--muted)]">
+            {queries.map((query) => (
+              <li key={query}>{query}</li>
+            ))}
+          </ol>
+        </div>
       ) : null}
       <div>
         <div className="flex items-center justify-between">

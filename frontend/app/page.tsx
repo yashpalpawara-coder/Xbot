@@ -15,26 +15,28 @@ export default function DashboardPage() {
   const [health, setHealth] = useState<Health | null>(null);
   const [sessions, setSessions] = useState<Sessions | null>(null);
   const [overview, setOverview] = useState<Overview | null>(null);
-  const [posts, setPosts] = useState<Post[]>([]);
-  const [jobs, setJobs] = useState<Job[]>([]);
+  const [posts, setPosts] = useState<Post[] | null>(null);
+  const [jobs, setJobs] = useState<Job[] | null>(null);
   const [topic, setTopic] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [activeJob, setActiveJob] = useState<string | null>(null);
   const live = useJob(activeJob);
 
   async function load() {
-    const [healthBody, sessionBody, overviewBody, postBody, jobBody] = await Promise.all([
-      request<Health>("/api/health"),
-      request<Sessions>("/api/sessions/status"),
-      request<Overview>("/api/analytics/overview"),
-      request<{ posts: Post[] }>("/api/finder/posts?limit=4"),
-      request<{ jobs: Job[] }>("/api/jobs?limit=6"),
+    const results = await Promise.allSettled([
+      request<Health>("/api/health").then(setHealth),
+      request<Sessions>("/api/sessions/status").then(setSessions),
+      request<Overview>("/api/analytics/overview").then(setOverview),
+      request<{ posts: Post[] }>("/api/finder/posts?limit=4").then((body) => setPosts(body.posts || [])),
+      request<{ jobs: Job[] }>("/api/jobs?limit=6").then((body) => setJobs(body.jobs || [])),
     ]);
-    setHealth(healthBody);
-    setSessions(sessionBody);
-    setOverview(overviewBody);
-    setPosts(postBody.posts);
-    setJobs(jobBody.jobs);
+    const failure = results.find((item) => item.status === "rejected");
+    if (failure?.status === "rejected") {
+      const reason = failure.reason;
+      setError(reason instanceof Error ? reason.message : "Could not load the desk");
+      return;
+    }
+    setError(null);
   }
 
   useEffect(() => {
@@ -81,10 +83,10 @@ export default function DashboardPage() {
       ) : null}
 
       <section className="grid gap-3 md:grid-cols-4">
-        <Stat label="Posts" value={counts?.posts ?? 0} />
-        <Stat label="Analysed" value={counts?.analyses ?? 0} />
-        <Stat label="Drafts" value={counts?.comments ?? 0} />
-        <Stat label="Published" value={counts?.published ?? 0} />
+        <Stat label="Posts" value={overview ? counts?.posts ?? 0 : null} />
+        <Stat label="Analysed" value={overview ? counts?.analyses ?? 0 : null} />
+        <Stat label="Drafts" value={overview ? counts?.comments ?? 0 : null} />
+        <Stat label="Published" value={overview ? counts?.published ?? 0 : null} />
       </section>
 
       <section className="grid gap-4 lg:grid-cols-[1.2fr_.8fr]">
@@ -116,15 +118,18 @@ export default function DashboardPage() {
             <h2 className="text-lg">{overview?.product_name ? `${overview.product_name} posts` : "Recent posts"}</h2>
             <Link href="/finder" className="text-sm text-[var(--gold)]">Finder</Link>
           </div>
-          {posts.length === 0 ? (
+          {posts === null ? (
+            <p className="text-[var(--muted)]">Loading posts…</p>
+          ) : posts.length === 0 ? (
             <p className="text-[var(--muted)]">{overview?.product_name ? `No posts saved for ${overview.product_name} yet.` : "No posts saved yet."}</p>
           ) : posts.map((post) => <PostCard key={post.id} post={post} />)}
         </div>
         <div className="panel p-5">
           <h2 className="text-lg">Recent jobs</h2>
           <ul className="mt-4 space-y-3 text-sm">
-            {jobs.length === 0 ? <li className="text-[var(--muted)]">No jobs yet.</li> : null}
-            {jobs.map((job) => (
+            {jobs === null ? <li className="text-[var(--muted)]">Loading jobs…</li> : null}
+            {jobs?.length === 0 ? <li className="text-[var(--muted)]">No jobs yet.</li> : null}
+            {(jobs ?? []).map((job) => (
               <li key={job.id} className="flex items-center justify-between gap-3 border-b border-[var(--line)] pb-3">
                 <span>{job.type.replaceAll("_", " ")}</span>
                 <span className="text-[var(--muted)]">{job.status} · {job.progress}%</span>
@@ -137,11 +142,11 @@ export default function DashboardPage() {
   );
 }
 
-function Stat({ label, value }: { label: string; value: number }) {
+function Stat({ label, value }: { label: string; value: number | null }) {
   return (
     <article className="panel stat">
       <span className="text-sm uppercase tracking-[0.14em] text-[var(--muted)]">{label}</span>
-      <b>{value}</b>
+      <b>{value === null ? "…" : value}</b>
     </article>
   );
 }

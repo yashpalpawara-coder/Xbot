@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,47 @@ TABLES = (
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def product_from_settings(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Rebuild one product when the product file is gone but settings still name it."""
+    if not isinstance(payload, dict):
+        return None
+    name = " ".join(str(payload.get("product_name") or "").split())
+    product_id = str(payload.get("selected_product_id") or "").strip()
+    if not name or not product_id:
+        return None
+    username = str(payload.get("x_username") or "").strip()
+    handle = username.lstrip("@") if username and "@" not in username else ""
+    return {
+        "id": product_id,
+        "name": name,
+        "url": str(payload.get("product_url") or "").strip(),
+        "detail": str(payload.get("product_pitch") or ""),
+        "finder_verified": False,
+        "verified_at": "",
+        "x_username": username,
+        "x_password": str(payload.get("x_password") or ""),
+        "x_handle": handle,
+        "chat_url": "",
+        "search_queries": [],
+        "creators": [],
+    }
+
+
+def _combine_products(remote: list[dict[str, Any]], local: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for item in [*remote, *local]:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or "")
+        if not item_id:
+            continue
+        if item_id not in by_id:
+            order.append(item_id)
+        by_id[item_id] = item
+    return [by_id[item_id] for item_id in order]
 
 
 def _keep_latest_per_product(rows: list[dict[str, Any]], limit: int = 200) -> list[dict[str, Any]]:
@@ -678,15 +720,19 @@ class SupabaseStore:
             total = header.split("/")[-1]
             return int(total) if total.isdigit() else 0
 
-        return {
-            "posts": count("posts"),
-            "analyses": count("analyses"),
-            "comments": count("comments"),
-            "approved": count("comments", {"status": "eq.approved"}),
-            "published": count("comments", {"status": "eq.published"}),
-            "failed": count("publish_events", {"status": "eq.failed"}),
-            "uncertain": count("publish_events", {"status": "eq.uncertain"}),
-        }
+        specs = (
+            ("posts", None),
+            ("analyses", None),
+            ("comments", None),
+            ("comments", {"status": "eq.approved"}),
+            ("comments", {"status": "eq.published"}),
+            ("publish_events", {"status": "eq.failed"}),
+            ("publish_events", {"status": "eq.uncertain"}),
+        )
+        with ThreadPoolExecutor(max_workers=len(specs)) as pool:
+            totals = list(pool.map(lambda spec: count(spec[0], spec[1]), specs))
+        keys = ("posts", "analyses", "comments", "approved", "published", "failed", "uncertain")
+        return dict(zip(keys, totals, strict=True))
 
     def export(self) -> dict[str, Any]:
         analyses = self._request(
@@ -739,20 +785,70 @@ class Store:
         elif settings.database_mode == "supabase":
             self.detail = "SUPABASE_URL or the publishable key is missing. Using the local JSON store."
 
+    def _settings_payload(self) -> dict[str, Any]:
+        saved = self._db().get_settings()
+        return saved if isinstance(saved, dict) else {}
+
+    def save_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        current = self._settings_payload()
+        if "products" in current and "products" not in payload:
+            payload = {**payload, "products": current["products"]}
+        return self._db().save_settings(payload)
+
     def save_product(self, row: dict[str, Any]) -> dict[str, Any]:
-        return self.local.save_product(row)
+        saved = self.local.save_product(row)
+        if self.remote is not None:
+            payload = self._settings_payload()
+            remote = [item for item in payload.get("products") or [] if isinstance(item, dict)]
+            payload["products"] = _combine_products(remote, self.local.list_products())[-20:]
+            self.remote.save_settings(payload)
+        return saved
 
     def list_products(self) -> list[dict[str, Any]]:
-        return self.local.list_products()
+        local = self.local.list_products()
+        if self.remote is None:
+            return local
+        payload = self._settings_payload()
+        remote = [item for item in payload.get("products") or [] if isinstance(item, dict)]
+        rows = _combine_products(remote, local)
+        if not rows:
+            recovered = product_from_settings(payload)
+            rows = [recovered] if recovered else []
+        if rows and rows != remote:
+            payload["products"] = rows[-20:]
+            self.remote.save_settings(payload)
+        local_ids = {str(item.get("id") or "") for item in local}
+        for item in rows:
+            if str(item.get("id") or "") not in local_ids:
+                self.local.save_product(item)
+        return rows
 
     def get_product(self, product_id: str) -> dict[str, Any] | None:
-        return self.local.get_product(product_id)
+        wanted = str(product_id or "")
+        if not wanted:
+            return None
+        for item in self.list_products():
+            if str(item.get("id") or "") == wanted:
+                return item
+        return None
 
     def find_product(self, name: str, url: str) -> dict[str, Any] | None:
-        return self.local.find_product(name, url)
+        name_key = " ".join(name.split()).casefold()
+        url_key = url.strip().rstrip("/").casefold()
+        by_name = None
+        by_url = None
+        for item in self.list_products():
+            item_name = " ".join(str(item.get("name") or "").split()).casefold()
+            item_url = str(item.get("url") or "").strip().rstrip("/").casefold()
+            if name_key and item_name == name_key:
+                by_name = item
+            elif url_key and item_url == url_key:
+                by_url = item
+        return by_name or by_url
 
     def latest_product(self) -> dict[str, Any] | None:
-        return self.local.latest_product()
+        rows = self.list_products()
+        return rows[-1] if rows else None
 
     def add_coming(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return self.local.add_coming(rows)

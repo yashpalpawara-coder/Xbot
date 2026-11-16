@@ -10,14 +10,16 @@ def test_reply_uses_the_same_chat_prompt() -> None:
     assert "Do not analyze the product again" in message
     assert "I\" means Ted" in message
     assert "I use Ted" in message
+    assert "interesting if the account name is hidden" in message
+    assert "Do not add a link" in message
     assert message.endswith("Put only the finished reply in one code block, so the copy box contains the reply and nothing else.")
     assert "https://tedcoachai.com" in message
     assert "Mac app" not in message
-    good = "When novelty and urgency take over, important tasks can get pushed aside. I'm Ted, a little Mac app that helps you pick three tasks each morning. 🌱 https://tedcoachai.com"
-    other = "Shipping the API gets easier when the checklist is already there. I'm North, and I keep the release list in one place. 🌱 https://north.example"
-    assert reply_problems(other, name="North", url="https://north.example", post_text="Ship the API.") == []
+    good = "When novelty takes over, the important task is the one that gets pushed aside. The fix is a smaller next step, not more motivation."
+    pitched = "Download Ted now and fix your morning. https://tedcoachai.com"
     assert reply_problems(good, name="Ted", url="https://tedcoachai.com", post_text=post) == []
-    user_voice = "I use Ted every morning on my Mac. 🌱 https://tedcoachai.com"
+    assert any("download" in item for item in reply_problems(pitched, name="Ted", url="https://tedcoachai.com", post_text=post))
+    user_voice = "I use Ted every morning when novelty takes over the important task."
     assert any("user" in item for item in reply_problems(user_voice, name="Ted", url="https://tedcoachai.com", post_text="Mac"))
     tagged = good + " #Focus"
     assert any("hashtag" in item for item in reply_problems(tagged, name="Ted", url="https://tedcoachai.com", post_text="Mac"))
@@ -27,6 +29,6 @@ def test_reply_uses_the_same_chat_prompt() -> None:
     assert "already saved" in saved
     assert "Ted is a Mac app for three morning tasks." in saved
     assert "already extracted in this same chat" not in saved
-    assert taken_reply("Sure\n```\nHello Ted on Mac 🌿 https://tedcoachai.com\n```") == "Hello Ted on Mac 🌿 https://tedcoachai.com"
-    labeled = "Plain text Notch timers are a great use of that Mac space! ⏱ I'm Ted. https://tedcoachai.com"
+    assert taken_reply("Sure\n```\nThe notch is useful when the next task stays visible.\n```") == "The notch is useful when the next task stays visible."
+    labeled = "Plain text The notch keeps the next task visible after the novelty fades."
     assert reply_problems(taken_reply(labeled), name="Ted", url="https://tedcoachai.com", post_text="Mac notch") == []

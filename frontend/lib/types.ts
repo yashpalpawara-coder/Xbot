@@ -83,6 +83,8 @@ export type Job = {
     session?: SessionInfo;
     text?: string;
     posted?: boolean;
+    queries?: string[];
+    creators?: string[];
   } | null;
 };
 
@@ -164,6 +166,8 @@ export type VerifiedProduct = {
   detail: string;
   finder_verified?: boolean;
   verified_at?: string;
+  search_queries?: string[];
+  creators?: string[];
 };
 
 export type ComingPost = {

@@ -34,10 +34,14 @@ def batch_count(value: int) -> int:
 def find_message(count: int = 20) -> str:
     count = batch_count(count)
     return (
-        "Using the product you already have in this chat, find related posts or audience posts of this product.\n"
+        "Using the product you already have in this chat, find posts where that audience is already talking.\n"
+        "Search the content universe around the product: the problems, habits, and topics those people discuss. "
+        "Do not search for the product name, a download, or an advertisement.\n"
+        "Keep a post when a thoughtful reply could add one insight. A smaller creator with the right audience is better than a huge unrelated post.\n"
+        "Skip posts that are only a link, a giveaway, generic praise, or an unrelated trend.\n"
         f"Return {count} posts.\n"
         "Give the URL of each post.\n"
-        "Keep a post only when it shows more than 500 views or more than 500 impressions.\n"
+        f"Keep a post only when it shows more than {VIEW_MIN} views or more than {VIEW_MIN} impressions.\n"
         "Use posts you actually found on X."
     )
 
@@ -46,9 +50,135 @@ def more_message(count: int = 20) -> str:
     return f"{batch_count(count)} more"
 
 
+VIEW_MIN = 500
+CREATOR_COUNT = 10
+QUERY_COUNT = 30
+POSTS_PER_QUERY = 1
+SEARCH_SCAN = 8
+QUERY_PAUSE_SECONDS = 5
+
+_FENCED = re.compile(r"```[^\n]*\n(.*?)```", re.S)
+_LINE_PREFIX = re.compile(r"^(?:[-*•]+|\d{1,3}[.)\]:-])\s*")
+_SKIP_LINE = re.compile(
+    r"^(?:here (?:are|is)|sure[,.!]?|these are|below are|search queries|i can |i'll |i will )\b",
+    re.I,
+)
+_LIMIT_PHRASES = (
+    "limit reached",
+    "limit reach",
+    "daily limit",
+    "free tier limit",
+    "reached your limit",
+    "reached the limit",
+    "rate limit",
+    "try again later",
+    "upgrade to premium",
+)
+
+
+LIMIT_NOTICE = "Free tier limit reached. Try again later or upgrade to Premium."
+
+
 def limit_reached(text: str) -> bool:
     lowered = text.lower()
-    return "limit reached" in lowered or "try again later" in lowered or "upgrade to premium" in lowered
+    return any(phrase in lowered for phrase in _LIMIT_PHRASES)
+
+
+def limit_reply(reply: str, page_text: str) -> str:
+    """The yellow limit banner is outside the reply. Keep the reply and record the banner."""
+    if limit_reached(reply):
+        return reply
+    if limit_reached(page_text):
+        return f"{reply}\n{LIMIT_NOTICE}".strip()
+    return reply
+
+
+def creators_message(name: str, url: str, analysis: str) -> str:
+    """Creators whose audience already talks about this product's problems."""
+    return (
+        f"Using the full product analysis already in this chat, name {CREATOR_COUNT} X creators "
+        "whose audience already discusses this product's problems.\n"
+        f"Name: {name.strip()}\n"
+        f"Product URL: {url.strip()}\n"
+        f"Analysis:\n{analysis.strip()[:4000]}\n"
+        "Mix smaller and medium creators. Skip huge unrelated accounts.\n"
+        f"Return exactly {CREATOR_COUNT} lines. One handle per line, without the @ sign.\n"
+        "No numbering, no explanation, and no URL."
+    )
+
+
+def creators_from_reply(text: str, limit: int = CREATOR_COUNT) -> list[str]:
+    """Handles only. Numbering, @ signs, and a code fence are ignored."""
+    blocks = _FENCED.findall(text or "")
+    body = "\n".join(blocks) if blocks else (text or "")
+    found: list[str] = []
+    seen: set[str] = set()
+    for raw in body.replace("\r\n", "\n").split("\n"):
+        line = _LINE_PREFIX.sub("", raw.strip().strip("`")).strip().strip("\"'")
+        handle = line.split()[0].lstrip("@") if line else ""
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,15}", handle):
+            continue
+        key = handle.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(handle)
+        if len(found) >= limit:
+            break
+    return found
+
+
+def over_view_threshold(views: object, minimum: int = VIEW_MIN) -> bool:
+    """Same rule as Grok: a missing count stays, a count of 500 or under is dropped."""
+    if views is None or views == "":
+        return True
+    try:
+        count = int(str(views).replace(",", ""))
+    except (TypeError, ValueError):
+        return True
+    return count > minimum
+
+
+def search_queries_message(name: str, url: str, analysis: str) -> str:
+    """Second ChatGPT message. The full analysis is already in the chat."""
+    return (
+        f"Using the full product analysis already in this chat, write {QUERY_COUNT} X search queries "
+        "that find conversations this product can usefully join.\n"
+        f"Name: {name.strip()}\n"
+        f"Product URL: {url.strip()}\n"
+        f"Analysis:\n{analysis.strip()[:6000]}\n"
+        "Search the content universe: the audience's problems, habits, and the words they already use. "
+        "Do not search for the product name, the word download, or an advertisement.\n"
+        "Each query should find posts where one thoughtful reply can add an insight. "
+        "Include smaller creators whose audience is the right people, not only the biggest accounts.\n"
+        "Do not use unrelated trends, giveaways, or posts that are only a link.\n"
+        f"Return exactly {QUERY_COUNT} lines. One search query per line.\n"
+        "No numbering, no quotes, and no explanation.\n"
+        "Do not repeat the analysis. Do not include a URL in a query."
+    )
+
+
+def queries_from_reply(text: str, limit: int = QUERY_COUNT) -> list[str]:
+    """One query per line. Numbering, bullets, and a code fence are ignored."""
+    blocks = _FENCED.findall(text or "")
+    body = "\n".join(blocks) if blocks else (text or "")
+    found: list[str] = []
+    seen: set[str] = set()
+    for raw in body.replace("\r\n", "\n").split("\n"):
+        line = _LINE_PREFIX.sub("", raw.strip().strip("`")).strip().strip("\"'")
+        line = " ".join(line.split())
+        if not line or _SKIP_LINE.match(line):
+            continue
+        if len(line) < 3 or len(line) > 180 or (line.endswith(":") and len(line.split()) < 8):
+            continue
+        key = line.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(line)
+        if len(found) >= limit:
+            break
+    return found
 
 
 def posts_from_reply(text: str) -> list[dict[str, object]]:
@@ -64,7 +194,7 @@ def posts_from_reply(text: str) -> list[dict[str, object]]:
         next_end = text.find("\n", line_end + 1) if line_end >= 0 else -1
         line = text[line_start : next_end if next_end >= 0 else len(text)]
         counts = [int(item.group(1).replace(",", "")) for item in _COUNT.finditer(line)]
-        if counts and max(counts) <= 500:
+        if counts and not over_view_threshold(max(counts)):
             continue
         seen.add(status_id)
         found.append(
