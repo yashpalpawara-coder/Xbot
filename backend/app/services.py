@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from pydantic import ValidationError
 
-from app.activity import collect_activity, load_activity, store_reply_draft
+from app.activity import collect_activity, load_activity, save_activity, store_reply_draft
 from app.browser_session import BrowserSession, SessionState
 from app.errors import AppError
 from app.grok_find import (
@@ -33,7 +33,7 @@ from app.grok_find import (
 )
 from app.jobs import JobManager
 from app.prompts import analysis_prompt, comments_prompt, regenerate_prompt
-from app.reply_rules import reply_problems, reply_prompt, rewrite_reply_prompt, taken_reply
+from app.reply_rules import engagement_count, reply_gate, reply_problems, reply_prompt, rewrite_reply_prompt, taken_reply
 from app.writer import compose_draft, earlier_texts, mark_posted, prepare_details, public_state, revise_details, store_details, store_draft
 from app.x_account import same_account
 from app.schemas import AnalysisBody, CommentBody, SearchIn, SettingsIn
@@ -712,36 +712,54 @@ class Service:
                 stored_post = self.store.get_post(str(row.get("post_id") or "")) if row.get("post_id") else None
                 text = str((stored_post or {}).get("text") or "").strip()
                 handle = str((stored_post or {}).get("handle") or row.get("handle") or "")
-                opened = None
-                if text.startswith("http") or len(text) < 12:
-                    opened = session.read_status(str(row.get("url") or ""))
-                    text = str((opened or {}).get("text") or "").strip()
-                    handle = str((opened or {}).get("handle") or handle)
+                try:
+                    opened = session.read_discussion(str(row.get("url") or ""))
+                except RuntimeError as exc:
+                    if "signed out" in str(exc).lower():
+                        raise
+                    self.jobs.log(job["id"], str(exc)[:180])
+                    opened = None
+                if not opened:
+                    mark(str(row.get("external_id") or ""), {"status": "skipped", "reply": "Could not open this post."})
+                    continue
+                text = str(opened.get("text") or text).strip()
+                handle = str(opened.get("handle") or handle)
+                comments = [item for item in opened.get("comments") or [] if str(item.get("text") or "").strip()]
+                views = opened.get("views") if opened.get("views") is not None else row.get("views")
+                reply_total = engagement_count(opened.get("replies"), len(comments))
                 if len(text) < 12:
                     mark(str(row.get("external_id") or ""), {"status": "skipped", "reply": "Too little text to reply to."})
                     continue
-                if opened:
-                    stored_post = self.store.upsert_post(
-                        {
-                            "id": str(row.get("post_id") or uuid.uuid4()),
-                            "external_id": str(row.get("external_id") or opened.get("external_id") or ""),
-                            "author": opened.get("author") or "",
-                            "handle": handle,
-                            "text": text[:500],
-                            "url": str(row.get("url") or opened.get("url") or ""),
-                            "language": guess_language(text),
-                            "relevance": None,
-                            "search_id": None,
-                            "created_at": opened.get("created_at"),
-                            "collected_at": _now(),
-                            "latest_views": opened.get("views") if opened.get("views") is not None else row.get("views"),
-                            "latest_likes": opened.get("likes"),
-                            "latest_reposts": opened.get("reposts"),
-                            "latest_replies": opened.get("replies"),
-                        }
-                    )
+                stored_post = self.store.upsert_post(
+                    {
+                        "id": str(row.get("post_id") or uuid.uuid4()),
+                        "external_id": str(row.get("external_id") or opened.get("external_id") or ""),
+                        "author": opened.get("author") or "",
+                        "handle": handle,
+                        "text": text[:500],
+                        "url": str(row.get("url") or opened.get("url") or ""),
+                        "language": guess_language(text),
+                        "relevance": None,
+                        "search_id": None,
+                        "created_at": opened.get("created_at"),
+                        "collected_at": _now(),
+                        "latest_views": views,
+                        "latest_likes": opened.get("likes"),
+                        "latest_reposts": opened.get("reposts"),
+                        "latest_replies": reply_total,
+                    }
+                )
                 if stored_post is None:
                     continue
+                reason = reply_gate(views, reply_total)
+                if reason:
+                    self.jobs.log(job["id"], reason)
+                    mark(str(row.get("external_id") or ""), {"status": "skipped", "reply": reason})
+                    continue
+                if not comments:
+                    mark(str(row.get("external_id") or ""), {"status": "skipped", "reply": "Could not read the comments on this post."})
+                    continue
+                self.jobs.log(job["id"], f"Read {len(comments)} comments on a post with {views} views.")
                 reply = str(row.get("reply") or "").strip() if str(row.get("status") or "") == "drafted" else ""
                 if reply:
                     self.jobs.log(job["id"], f"Posting the saved reply for @{handle or 'post'}.", progress=20 + int(70 * index / max(total, 1)))
@@ -757,6 +775,7 @@ class Service:
                             name=name,
                             url=url,
                             analysis=detail if fresh_chat else "",
+                            comments=comments,
                         ),
                         _cancelled(job),
                         "" if fresh_chat else chat_url,
@@ -1293,6 +1312,11 @@ class Service:
         if snapshot.get("collected_at"):
             return snapshot
         product = self._selected_raw()
+        product_id = str(product.get("id") or "") if isinstance(product, dict) else ""
+        stored = self.store.load_activity_snapshot(product_id) if product_id else None
+        if isinstance(stored, dict) and stored.get("collected_at"):
+            save_activity(path, stored)
+            return stored
         legacy_path = self.settings.store_path.parent / "activity.json"
         if product is None or path == legacy_path:
             return snapshot
@@ -1315,6 +1339,14 @@ class Service:
             raise AppError("That reply is not in the latest scan.", 404, "not_found")
         return self.jobs.start("activity_draft", lambda job: self._draft_activity(job, row))
 
+    def _remember_activity(self, snapshot: dict[str, Any]) -> None:
+        if not isinstance(snapshot, dict) or not snapshot.get("collected_at"):
+            return
+        product = self._selected_raw()
+        if not isinstance(product, dict) or not product.get("id"):
+            return
+        self.store.save_activity_snapshot(str(product["id"]), snapshot)
+
     def _activity_path(self) -> Any:
         folder = self.settings.store_path.parent
         product = self._selected_raw()
@@ -1326,7 +1358,27 @@ class Service:
         return self.settings.store_path.parent / "daily_post.json"
 
     def daily_post_state(self) -> dict[str, Any]:
-        return public_state(self._post_path())
+        state = public_state(self._post_path())
+        details = state.get("details") if isinstance(state.get("details"), dict) else None
+        if str((details or {}).get("writeup") or "").strip():
+            return state
+        product = self._selected_raw()
+        if not isinstance(product, dict):
+            return state
+        text = str(product.get("detail") or "").strip()
+        name = str(product.get("name") or "").strip()
+        if not text and not name:
+            return state
+        state["details"] = {
+            "writeup": text,
+            "summary": " ".join(text.split())[:500],
+            "name": name,
+            "url": str(product.get("url") or ""),
+            "verified": bool(text),
+            "verified_at": str(product.get("verified_at") or ""),
+            "chat_url": str(product.get("chat_url") or ""),
+        }
+        return state
 
     def start_post_details(self, name: str, url: str) -> dict[str, Any]:
         product_name, product_url = _product_fields(name, url)
@@ -1524,7 +1576,9 @@ class Service:
                 state = session.ensure_x(_cancelled(job), lambda message: self.jobs.log(job["id"], message, progress=15))
                 if state.status != "signed_in":
                     raise RuntimeError(state.detail)
-            return collect_activity(session, path, log, progress, _cancelled(job))
+            snapshot = collect_activity(session, path, log, progress, _cancelled(job))
+        self._remember_activity(snapshot)
+        return snapshot
 
     def _draft_activity(self, job: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
         prefs = self.current_settings()
@@ -1566,6 +1620,7 @@ class Service:
                 draft = {"status": "draft", "reason": "", "text": text, "posted": False}
         try:
             store_reply_draft(self._activity_path(), str(row.get("id") or ""), draft)
+            self._remember_activity(load_activity(self._activity_path()))
         except KeyError as exc:
             raise RuntimeError("That reply is no longer in the scan.") from exc
         self.jobs.update(job["id"], message="Draft saved. Nothing was posted.")

@@ -532,6 +532,16 @@ class SupabaseStore:
         return self._one(payload)
 
     def upsert_post(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Keep the existing post id. A new id would retarget the primary key and break comments."""
+        external_id = str(row.get("external_id") or "")
+        if external_id:
+            found = self._request(
+                "GET",
+                "posts",
+                params={"select": "id", "external_id": f"eq.{external_id}", "limit": "1"},
+            ) or []
+            if found and found[0].get("id"):
+                row = {**row, "id": found[0]["id"]}
         payload = self._request(
             "POST",
             "posts",
@@ -791,9 +801,29 @@ class Store:
 
     def save_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         current = self._settings_payload()
-        if "products" in current and "products" not in payload:
-            payload = {**payload, "products": current["products"]}
+        for key in ("products", "activity_scans"):
+            if key in current and key not in payload:
+                payload = {**payload, key: current[key]}
         return self._db().save_settings(payload)
+
+    def load_activity_snapshot(self, product_id: str) -> dict[str, Any] | None:
+        scans = self._settings_payload().get("activity_scans")
+        if not isinstance(scans, dict):
+            return None
+        row = scans.get(str(product_id or ""))
+        return row if isinstance(row, dict) else None
+
+    def save_activity_snapshot(self, product_id: str, snapshot: dict[str, Any]) -> None:
+        product_id = str(product_id or "")
+        if not product_id or not isinstance(snapshot, dict):
+            return
+        payload = self._settings_payload()
+        scans = payload.get("activity_scans")
+        if not isinstance(scans, dict):
+            scans = {}
+        scans[product_id] = snapshot
+        payload["activity_scans"] = scans
+        self._db().save_settings(payload)
 
     def save_product(self, row: dict[str, Any]) -> dict[str, Any]:
         saved = self.local.save_product(row)

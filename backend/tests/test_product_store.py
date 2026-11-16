@@ -64,6 +64,17 @@ def test_missing_local_product_is_rebuilt_from_settings(tmp_path) -> None:
     assert store.local.list_products()[0]["name"] == "Vimvo"
 
 
+def test_activity_scan_is_kept_with_the_product(tmp_path) -> None:
+    store = _store(tmp_path)
+    remote = _Remote({"product_name": "Vimvo", "products": [{"id": "abc", "name": "Vimvo"}]})
+    store.remote = remote
+    store.save_activity_snapshot("abc", {"collected_at": "2026-11-16T00:00:00+00:00", "handle": "VimVo60", "posts": [{"id": "1"}]})
+    assert store.load_activity_snapshot("abc")["handle"] == "VimVo60"
+    store.save_settings({"product_name": "Vimvo"})
+    assert store.load_activity_snapshot("abc")["posts"][0]["id"] == "1"
+    assert remote.payload["products"][0]["id"] == "abc"
+
+
 def test_saving_settings_keeps_products_already_in_the_payload(tmp_path) -> None:
     store = _store(tmp_path)
     remote = _Remote({"product_name": "Vimvo", "products": [{"id": "abc", "name": "Vimvo"}]})

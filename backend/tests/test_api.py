@@ -162,6 +162,18 @@ def _settings_body(name: str = "Ted", url: str = "https://tedcoachai.com") -> di
     }
 
 
+def test_saved_product_fills_the_analysis_form_without_the_local_file(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    detail = "Vimvo is a voice app. It turns a spoken note into a short written post."
+    _verify(client, tmp_path, "Vimvo", "https://vimvo.example", detail, True)
+    (tmp_path / "daily_post.json").unlink()
+    state = client.get("/api/post/today").json()
+    assert state["details"]["name"] == "Vimvo"
+    assert state["details"]["url"] == "https://vimvo.example"
+    assert state["details"]["writeup"] == detail
+    assert state["details"]["verified"] is True
+
+
 def test_each_product_has_its_own_coming_list_and_login(tmp_path, monkeypatch) -> None:
     client = _client(tmp_path, monkeypatch)
     ted_detail = "Ted is a Mac app. It asks for three tasks and is for people who work on a Mac."
