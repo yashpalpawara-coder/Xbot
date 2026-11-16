@@ -1301,9 +1301,33 @@ class Service:
             counts["posts"] = len(owned)
         return {
             "counts": counts,
+            "scan": self._scan_counts(),
             "logs": self.store.list_logs(20),
             "database": self.store.mode,
             "product_name": str((product or {}).get("name") or ""),
+        }
+
+    def _scan_counts(self) -> dict[str, Any]:
+        """Original posts and the other totals from the latest activity refresh."""
+        snapshot = self.activity_snapshot()
+        fresh = bool(snapshot.get("collected_at"))
+
+        def number(key: str) -> int | None:
+            if not fresh:
+                return None
+            try:
+                return int(snapshot.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        return {
+            "posts": number("posts_created"),
+            "comments": number("comments_dropped"),
+            "views": number("views"),
+            "likes": number("likes"),
+            "replies": number("replies_received"),
+            "collected_at": str(snapshot.get("collected_at") or ""),
+            "handle": str(snapshot.get("handle") or ""),
         }
 
     def activity_snapshot(self) -> dict[str, Any]:

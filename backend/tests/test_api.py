@@ -162,6 +162,33 @@ def _settings_body(name: str = "Ted", url: str = "https://tedcoachai.com") -> di
     }
 
 
+def test_overview_posts_are_only_the_latest_original_posts(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    detail = "Vimvo is a voice app. It turns a spoken note into a short written post."
+    product = _verify(client, tmp_path, "Vimvo", "https://vimvo.example", detail, True)
+    (tmp_path / f"activity-{product['id']}.json").write_text(
+        json.dumps(
+            {
+                "collected_at": "2026-11-16T09:38:41+00:00",
+                "handle": "VimVo60",
+                "posts_created": 12,
+                "comments_dropped": 4,
+                "views": 80,
+                "likes": 6,
+                "replies_received": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    scan = client.get("/api/analytics/overview").json()["scan"]
+    assert scan["posts"] == 12
+    assert scan["comments"] == 4
+    assert scan["views"] == 80
+    assert scan["likes"] == 6
+    assert scan["replies"] == 1
+    assert scan["handle"] == "VimVo60"
+
+
 def test_saved_product_fills_the_analysis_form_without_the_local_file(tmp_path, monkeypatch) -> None:
     client = _client(tmp_path, monkeypatch)
     detail = "Vimvo is a voice app. It turns a spoken note into a short written post."

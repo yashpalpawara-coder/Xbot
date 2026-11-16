@@ -5,7 +5,7 @@ import { FormEvent, MouseEvent, useEffect, useState } from "react";
 
 import { JobLog } from "@/components/post-card";
 import { PostCard } from "@/components/post-card";
-import { metric, request } from "@/lib/api";
+import { metric, request, when } from "@/lib/api";
 import type { Health, Job, Overview, Post, SessionInfo } from "@/lib/types";
 import { useJob } from "@/lib/use-job";
 
@@ -69,6 +69,7 @@ export default function DashboardPage() {
   }
 
   const counts = overview?.counts;
+  const scan = overview?.scan;
 
   return (
     <div className="space-y-8">
@@ -82,12 +83,18 @@ export default function DashboardPage() {
         <p className="panel p-4 text-sm text-[var(--muted)]">{health.database_detail} The app keeps working from the local store until the Supabase tables exist.</p>
       ) : null}
 
-      <section className="grid gap-3 md:grid-cols-4">
-        <Stat label="Posts" value={overview ? counts?.posts ?? 0 : null} />
-        <Stat label="Analysed" value={overview ? counts?.analyses ?? 0 : null} />
-        <Stat label="Drafts" value={overview ? counts?.comments ?? 0 : null} />
-        <Stat label="Published" value={overview ? counts?.published ?? 0 : null} />
+      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <Stat label="Posts" value={overview ? scan?.posts ?? null : null} detail="you wrote" />
+        <Stat label="Comments" value={overview ? scan?.comments ?? null : null} detail="you left" />
+        <Stat label="Views" value={overview ? scan?.views ?? null : null} detail="posts and replies" />
+        <Stat label="Likes" value={overview ? scan?.likes ?? null : null} detail="posts and replies" />
+        <Stat label="Replies" value={overview ? scan?.replies ?? null : null} detail="people wrote back" />
       </section>
+      <p className="text-sm text-[var(--muted)]">
+        {scan?.collected_at
+          ? `Latest activity refresh${scan.handle ? ` · @${scan.handle}` : ""} · ${when(scan.collected_at)}`
+          : "Refresh activity on Analysis. These numbers follow that scan."}
+      </p>
 
       <section className="grid gap-4 lg:grid-cols-[1.2fr_.8fr]">
         <div className="panel p-5">
@@ -142,11 +149,12 @@ export default function DashboardPage() {
   );
 }
 
-function Stat({ label, value }: { label: string; value: number | null }) {
+function Stat({ label, value, detail }: { label: string; value: number | null; detail?: string }) {
   return (
     <article className="panel stat">
       <span className="text-sm uppercase tracking-[0.14em] text-[var(--muted)]">{label}</span>
-      <b>{value === null ? "…" : value}</b>
+      <b>{value === null ? "…" : value.toLocaleString()}</b>
+      {detail ? <span className="mt-1 block text-sm text-[var(--muted)]">{detail}</span> : null}
     </article>
   );
 }

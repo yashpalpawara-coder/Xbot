@@ -209,6 +209,15 @@ export type ActivitySnapshot = {
 };
 
 export type Overview = {
+  scan?: {
+    posts: number | null;
+    comments: number | null;
+    views: number | null;
+    likes: number | null;
+    replies: number | null;
+    collected_at?: string;
+    handle?: string;
+  };
   counts: {
     posts: number;
     analyses: number;
