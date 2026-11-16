@@ -335,6 +335,36 @@ def store_reply_draft(path: Path, response_id: str, draft: dict[str, Any]) -> di
     return draft
 
 
+def split_own_statuses(
+    originals: list[dict[str, Any]],
+    mixed: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Posts are only the profile Posts tab. Replies stay comments even with no "Replying to" label."""
+    by_id: dict[str, dict[str, Any]] = {}
+    for card in [*originals, *mixed]:
+        status_id = str(card.get("id") or "")
+        if status_id:
+            by_id[status_id] = card
+    posts: list[dict[str, Any]] = []
+    post_ids: set[str] = set()
+    for card in originals:
+        status_id = str(card.get("id") or "")
+        latest = by_id.get(status_id, card)
+        if not status_id or latest.get("reply_to") or status_id in post_ids:
+            continue
+        posts.append(latest)
+        post_ids.add(status_id)
+    replies: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for card in [*mixed, *originals]:
+        status_id = str(card.get("id") or "")
+        if not status_id or status_id in post_ids or status_id in seen:
+            continue
+        replies.append(by_id.get(status_id, card))
+        seen.add(status_id)
+    return posts, replies
+
+
 def _gather_everything(
     session: Any,
     page: Any,
@@ -342,16 +372,12 @@ def _gather_everything(
     stop: Callable[[], bool] | None,
     log: Callable[[str], None],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int | None, bool]:
-    """Scroll posts and replies until both timelines stop, then keep each status once."""
+    """Scroll the Posts tab and the replies timeline, then keep each status once."""
     originals = _scroll_timeline(session, page, f"https://x.com/{handle}", handle, False, stop, log, "posts")
     mixed: list[dict[str, Any]] = []
     if not _halted(stop):
         mixed = _scroll_timeline(session, page, f"https://x.com/{handle}/with_replies", handle, None, stop, log, "replies")
-    by_id: dict[str, dict[str, Any]] = {}
-    for card in [*originals, *mixed]:
-        by_id[str(card["id"])] = card
-    posts = [card for card in by_id.values() if not card.get("reply_to")]
-    replies = [card for card in by_id.values() if card.get("reply_to")]
+    posts, replies = split_own_statuses(originals, mixed)
     facts = _facts(page)
     stated = facts.get("posts")
     stated_posts = stated if isinstance(stated, int) else None

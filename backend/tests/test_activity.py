@@ -1,4 +1,4 @@
-from app.activity import cards_from_page, categorize_responses, classify_reply, incoming_replies, totals
+from app.activity import cards_from_page, categorize_responses, classify_reply, incoming_replies, split_own_statuses, totals
 
 
 def test_question_and_objection_are_separated() -> None:
@@ -33,6 +33,31 @@ def test_incoming_skips_the_account_and_the_focus_post() -> None:
     ]
     incoming = incoming_replies(cards, "1", "tedcoachhq")
     assert [item["id"] for item in incoming] == ["2"]
+
+
+def test_posts_count_is_only_the_profile_posts_tab() -> None:
+    originals = [
+        {"id": "1", "text": "A fresh start", "reply_to": ""},
+        {"id": "2", "text": "Tomorrow is Sunday", "reply_to": ""},
+        {"id": "3", "text": "You need a plan", "reply_to": ""},
+        {"id": "4", "text": "One habit worth keeping", "reply_to": ""},
+    ]
+    mixed = [
+        *originals,
+        {"id": "5", "text": "Packing your gym bag", "reply_to": ""},
+        {"id": "6", "text": "Nice win", "reply_to": "someone"},
+    ]
+    posts, replies = split_own_statuses(originals, mixed)
+    assert [item["id"] for item in posts] == ["1", "2", "3", "4"]
+    assert [item["id"] for item in replies] == ["5", "6"]
+
+
+def test_a_posts_tab_card_later_marked_as_a_reply_is_a_comment() -> None:
+    originals = [{"id": "1", "text": "Looks like a post", "reply_to": "", "views": 2}]
+    mixed = [{"id": "1", "text": "Looks like a post", "reply_to": "someone", "views": 4}]
+    posts, replies = split_own_statuses(originals, mixed)
+    assert posts == []
+    assert replies == [{"id": "1", "text": "Looks like a post", "reply_to": "someone", "views": 4}]
 
 
 def test_totals_add_posts_and_comments() -> None:
