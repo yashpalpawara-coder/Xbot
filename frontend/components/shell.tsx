@@ -14,6 +14,7 @@ const links = [
   ["/coming", "Coming"],
   ["/saved", "Library"],
   ["/analytics", "Analysis"],
+  ["/ranks", "Ranks"],
   ["/settings", "Settings"],
 ];
 

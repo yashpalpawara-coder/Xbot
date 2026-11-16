@@ -1099,6 +1099,46 @@ class BrowserSession:
         posts = page.evaluate(EXTRACT_JS)
         return posts[0] if posts else None
 
+    def read_discussion(self, url: str, limit: int = 40) -> dict[str, Any] | None:
+        """Open one post and load the replies under it, with each reply's likes, views, and text."""
+        page = self._page("x.com")
+        target = url.split("?")[0]
+        if target not in (page.url or ""):
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        if not self.x_logged_in(page):
+            page = self.sign_in_if_needed(page)
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            if not self.x_logged_in(page):
+                raise RuntimeError("X is signed out. Add the username and password in Settings.")
+        try:
+            page.locator('article[data-testid="tweet"]').first.wait_for(state="visible", timeout=8_000)
+        except PlaywrightTimeout:
+            return None
+        found: dict[str, dict[str, Any]] = {}
+        stale = 0
+        while stale < 3 and len(found) < limit + 1:
+            before = len(found)
+            for item in page.evaluate(EXTRACT_JS):
+                found.setdefault(str(item["external_id"]), item)
+            if len(found) == before:
+                stale += 1
+            else:
+                stale = 0
+            if len(found) >= limit + 1:
+                break
+            page.mouse.wheel(0, 1400)
+            page.wait_for_timeout(700)
+        posts = list(found.values())
+        if not posts:
+            return None
+        match = re.search(r"status/(\d+)", url)
+        target_id = match.group(1) if match else ""
+        root = next((item for item in posts if str(item.get("external_id") or "") == target_id), posts[0])
+        comments = [item for item in posts if str(item.get("external_id") or "") != str(root.get("external_id") or "")]
+        opened = dict(root)
+        opened["comments"] = comments[:limit]
+        return opened
+
     def open_post(self, url: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         page = self.open_x()
         if not self.x_logged_in(page):

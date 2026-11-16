@@ -73,7 +73,7 @@ export default function ComingPage() {
       <section className="panel space-y-4 p-5">
         <p className="text-sm text-[var(--muted)]">
           {productName ? `${productName} has its own list. ` : ""}
-          {posts.length} saved. {waiting} left. Replies use the saved analysis, then each post is liked, then the next one waits 30 seconds.
+          {posts.length} saved. {waiting} left. A post needs more than 500 views and at least 5 comments. The reply follows the comments people already liked, then the post is liked, then the next one waits 30 seconds.
         </p>
         <div className="flex flex-wrap gap-2">
           <button className="btn" type="button" onClick={() => void start()} disabled={waiting === 0 || job?.status === "running"}>

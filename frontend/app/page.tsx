@@ -6,7 +6,7 @@ import { FormEvent, MouseEvent, useEffect, useState } from "react";
 import { JobLog } from "@/components/post-card";
 import { PostCard } from "@/components/post-card";
 import { metric, request, when } from "@/lib/api";
-import type { Health, Job, Overview, Post, SessionInfo } from "@/lib/types";
+import type { ActivitySnapshot, Health, Job, Overview, Post, SessionInfo } from "@/lib/types";
 import { useJob } from "@/lib/use-job";
 
 type Sessions = { x: SessionInfo; chatgpt: SessionInfo; database: string; database_detail: string };
@@ -15,6 +15,7 @@ export default function DashboardPage() {
   const [health, setHealth] = useState<Health | null>(null);
   const [sessions, setSessions] = useState<Sessions | null>(null);
   const [overview, setOverview] = useState<Overview | null>(null);
+  const [scan, setScan] = useState<ActivitySnapshot | undefined>(undefined);
   const [posts, setPosts] = useState<Post[] | null>(null);
   const [jobs, setJobs] = useState<Job[] | null>(null);
   const [topic, setTopic] = useState("");
@@ -27,6 +28,7 @@ export default function DashboardPage() {
       request<Health>("/api/health").then(setHealth),
       request<Sessions>("/api/sessions/status").then(setSessions),
       request<Overview>("/api/analytics/overview").then(setOverview),
+      request<ActivitySnapshot>("/api/activity").then(setScan),
       request<{ posts: Post[] }>("/api/finder/posts?limit=4").then((body) => setPosts(body.posts || [])),
       request<{ jobs: Job[] }>("/api/jobs?limit=6").then((body) => setJobs(body.jobs || [])),
     ]);
@@ -45,7 +47,11 @@ export default function DashboardPage() {
       void load().catch((exc: Error) => setError(exc.message));
     }
     window.addEventListener("xbot-product", onProduct);
-    return () => window.removeEventListener("xbot-product", onProduct);
+    window.addEventListener("focus", onProduct);
+    return () => {
+      window.removeEventListener("xbot-product", onProduct);
+      window.removeEventListener("focus", onProduct);
+    };
   }, []);
 
   useEffect(() => {
@@ -69,7 +75,8 @@ export default function DashboardPage() {
   }
 
   const counts = overview?.counts;
-  const scan = overview?.scan;
+  const fresh = Boolean(scan?.collected_at);
+  const posted = fresh ? scan?.posts_created ?? 0 : null;
 
   return (
     <div className="space-y-8">
@@ -84,15 +91,15 @@ export default function DashboardPage() {
       ) : null}
 
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        <Stat label="Posts" value={overview ? scan?.posts ?? null : null} detail="you wrote" />
-        <Stat label="Comments" value={overview ? scan?.comments ?? null : null} detail="you left" />
-        <Stat label="Views" value={overview ? scan?.views ?? null : null} detail="posts and replies" />
-        <Stat label="Likes" value={overview ? scan?.likes ?? null : null} detail="posts and replies" />
-        <Stat label="Replies" value={overview ? scan?.replies ?? null : null} detail="people wrote back" />
+        <Stat label="Posts" value={scan === undefined ? null : posted} detail="you wrote" />
+        <Stat label="Comments" value={scan === undefined ? null : fresh ? scan?.comments_dropped ?? 0 : null} detail="you left" />
+        <Stat label="Views" value={scan === undefined ? null : fresh ? scan?.views ?? 0 : null} detail="posts and replies" />
+        <Stat label="Likes" value={scan === undefined ? null : fresh ? scan?.likes ?? 0 : null} detail="posts and replies" />
+        <Stat label="Replies" value={scan === undefined ? null : fresh ? scan?.replies_received ?? 0 : null} detail="people wrote back" />
       </section>
       <p className="text-sm text-[var(--muted)]">
-        {scan?.collected_at
-          ? `Latest activity refresh${scan.handle ? ` · @${scan.handle}` : ""} · ${when(scan.collected_at)}`
+        {fresh
+          ? `Latest activity refresh${scan?.handle ? ` · @${scan.handle}` : ""} · ${when(scan?.collected_at)}`
           : "Refresh activity on Analysis. These numbers follow that scan."}
       </p>
 
