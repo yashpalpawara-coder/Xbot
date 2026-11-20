@@ -130,6 +130,7 @@ function ProductFind() {
   const [savedDetail, setSavedDetail] = useState("");
   const [finderVerified, setFinderVerified] = useState(false);
   const [changing, setChanging] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   const [change, setChange] = useState("");
   const [coming, setComing] = useState<ComingPost[]>([]);
   const [listName, setListName] = useState("");
@@ -139,8 +140,23 @@ function ProductFind() {
   const [batch, setBatch] = useState("20");
   const [queries, setQueries] = useState<string[]>([]);
   const [creators, setCreators] = useState<string[]>([]);
+  const [country, setCountry] = useState("All");
   const job = useJob(jobId);
-  const ready = finderVerified && detail.trim() !== "" && detail.trim() === savedDetail.trim();
+  const ready = finderVerified && detail.trim() !== "" && detail.trim() === savedDetail.trim() && !reviewing;
+  const countryCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const post of coming) {
+      const name = post.country?.trim() || "Unknown";
+      counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    return [...counts.entries()].sort((left, right) => {
+      if (left[0] === "Unknown") return 1;
+      if (right[0] === "Unknown") return -1;
+      return right[1] - left[1] || left[0].localeCompare(right[0]);
+    });
+  }, [coming]);
+  const shown = country === "All" ? coming : coming.filter((post) => (post.country?.trim() || "Unknown") === country);
+  const revising = job?.type === "post_details" && (job.status === "running" || Boolean(jobId && !job));
 
   async function load() {
     const [productBody, today, list, settingsBody] = await Promise.all([
@@ -202,9 +218,11 @@ function ProductFind() {
         body: JSON.stringify({ text: note }),
       });
       setJobId(started.id);
+      setReviewing(true);
       setChanging(false);
       setChange("");
     } catch (exc) {
+      setReviewing(false);
       setError(exc instanceof Error ? exc.message : "Could not change the details.");
     } finally {
       setBusy(false);
@@ -212,7 +230,12 @@ function ProductFind() {
   }
 
   useEffect(() => {
-    if (job?.status === "done" && job.type === "post_details") void load();
+    if (job?.type !== "post_details") return;
+    if (job.status === "done") {
+      setReviewing(true);
+      void load();
+    }
+    if (job.status === "error" || job.status === "stopped") setReviewing(false);
   }, [job]);
 
   async function verify() {
@@ -223,7 +246,9 @@ function ProductFind() {
         method: "POST",
         body: JSON.stringify({ name, url, detail, for_finder: true }),
       });
+      setReviewing(false);
       await load();
+      window.dispatchEvent(new Event("xbot-product"));
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "Could not verify.");
     } finally {
@@ -270,12 +295,15 @@ function ProductFind() {
       ) : (
         <p className="text-sm text-[var(--muted)]">Verify a product on Analysis first. It will show here.</p>
       )}
-      {detail && !ready ? (
+      {detail ? (
         <div className="flex flex-wrap gap-2">
-          <button className="btn-ghost" type="button" onClick={() => setChanging((open) => !open)}>Need to change</button>
-          <button className="btn" type="button" onClick={() => void verify()} disabled={busy || !name.trim() || !url.trim()}>Verify</button>
+          <button className="btn-ghost" type="button" onClick={() => setChanging((open) => !open)} disabled={revising}>Need to change</button>
+          {!ready ? (
+            <button className="btn" type="button" onClick={() => void verify()} disabled={busy || revising || !name.trim() || !url.trim()}>Verify</button>
+          ) : null}
         </div>
       ) : null}
+      {!ready && detail ? <p className="text-sm text-[var(--muted)]">Verify saves this analysis and replaces the previous one.</p> : null}
       {changing ? (
         <div className="space-y-2">
           <label className="block">
@@ -331,10 +359,43 @@ function ProductFind() {
           <a className="text-sm text-[var(--gold)]" href="/coming">Open the coming panel</a>
         </div>
         {coming.length === 0 ? <p className="mt-2 text-sm text-[var(--muted)]">{listName ? `None yet for ${listName}.` : "None yet."}</p> : null}
+        {coming.length > 0 ? (
+          <div className="mt-3">
+            <label className="block max-w-xs">
+              <span className="label">Country</span>
+              <select className="select" value={countryCounts.some(([name]) => name === country) ? country : "All"} onChange={(event) => setCountry(event.target.value)}>
+                <option value="All">All countries</option>
+                {countryCounts.map(([name]) => (
+                  <option key={name} value={name}>{name}</option>
+                ))}
+              </select>
+            </label>
+            <p className="mt-2 text-sm text-[var(--muted)]">Country is the place on the post, the Account based in label, or a profile location that names a country. Otherwise the post is Unknown.</p>
+            <table className="mt-3 w-full text-sm">
+              <thead>
+                <tr className="text-left text-[var(--muted)]">
+                  <th className="pb-2 font-normal">Country</th>
+                  <th className="pb-2 font-normal">Posts</th>
+                </tr>
+              </thead>
+              <tbody>
+                {countryCounts.map(([name, count]) => (
+                  <tr key={name} className="border-t border-[var(--line)]">
+                    <td className="py-2">
+                      <button className="text-[var(--gold)]" type="button" onClick={() => setCountry(name)}>{name}</button>
+                    </td>
+                    <td className="py-2">{count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
         <ul className="mt-2 space-y-2">
-          {coming.map((post) => (
+          {shown.map((post) => (
             <li key={post.id} className="rounded-2xl bg-[var(--paper)] p-3 text-sm">
               <a className="break-all text-[var(--gold)]" href={post.url} target="_blank" rel="noreferrer">{post.url}</a>
+              <span className="mt-1 block text-[var(--muted)]">{post.country?.trim() || "Unknown"}</span>
               {post.views ? <span className="mt-1 block text-[var(--muted)]">{post.views.toLocaleString()} views</span> : null}
               {post.note ? <span className="mt-1 block text-[var(--muted)]">{post.note}</span> : null}
             </li>

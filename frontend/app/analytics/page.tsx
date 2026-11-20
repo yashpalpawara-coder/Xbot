@@ -31,6 +31,7 @@ export default function AnalyticsPage() {
   const [postState, setPostState] = useState<DailyPostState | null>(null);
   const [writeJobId, setWriteJobId] = useState<string | null>(null);
   const [detailsJobId, setDetailsJobId] = useState<string | null>(null);
+  const [reviewing, setReviewing] = useState(false);
   const [publishJobId, setPublishJobId] = useState<string | null>(null);
   const live = useJob(jobId);
   const draftJob = useJob(draftJobId);
@@ -109,11 +110,16 @@ export default function AnalyticsPage() {
 
   useEffect(() => {
     if (detailsJob?.status === "done") {
+      setReviewing(true);
       void request<DailyPostState>("/api/post/today").then(rememberPost).catch(() => undefined);
+      window.dispatchEvent(new Event("xbot-product"));
       setDetailsJobId(null);
     }
     if (detailsJob?.status === "error") setError(detailsJob.error || detailsJob.message);
-    if (detailsJob?.status === "error" || detailsJob?.status === "stopped") setDetailsJobId(null);
+    if (detailsJob?.status === "error" || detailsJob?.status === "stopped") {
+      setReviewing(false);
+      setDetailsJobId(null);
+    }
   }, [detailsJob]);
 
   useEffect(() => {
@@ -160,14 +166,26 @@ export default function AnalyticsPage() {
 
   async function gatherDetails(name: string, url: string) {
     setError(null);
-    const job = await request<Job>("/api/post/details", { method: "POST", body: JSON.stringify({ name, url }) });
-    setDetailsJobId(job.id);
+    setReviewing(true);
+    try {
+      const job = await request<Job>("/api/post/details", { method: "POST", body: JSON.stringify({ name, url }) });
+      setDetailsJobId(job.id);
+    } catch (exc) {
+      setReviewing(false);
+      throw exc;
+    }
   }
 
   async function reviseDetails(text: string) {
     setError(null);
-    const job = await request<Job>("/api/post/details/revise", { method: "POST", body: JSON.stringify({ text }) });
-    setDetailsJobId(job.id);
+    setReviewing(true);
+    try {
+      const job = await request<Job>("/api/post/details/revise", { method: "POST", body: JSON.stringify({ text }) });
+      setDetailsJobId(job.id);
+    } catch (exc) {
+      setReviewing(false);
+      throw exc;
+    }
   }
 
   async function verifyDetails(name: string, url: string, detail: string) {
@@ -176,7 +194,9 @@ export default function AnalyticsPage() {
       method: "POST",
       body: JSON.stringify({ name, url, detail }),
     });
+    setReviewing(false);
     rememberPost(await request<DailyPostState>("/api/post/today"));
+    window.dispatchEvent(new Event("xbot-product"));
   }
 
   async function writePost(text: string) {
@@ -246,6 +266,7 @@ export default function AnalyticsPage() {
         publishing={publishJob?.status === "running" || Boolean(publishJobId && !publishJob)}
         onDetails={(name, url) => void gatherDetails(name, url).catch((exc: Error) => setError(exc.message))}
         onRevise={(text) => void reviseDetails(text).catch((exc: Error) => setError(exc.message))}
+        reviewing={reviewing}
         onVerify={(name, url, detail) => void verifyDetails(name, url, detail).catch((exc: Error) => setError(exc.message))}
         onWrite={(text) => void writePost(text).catch((exc: Error) => setError(exc.message))}
         onApprove={(text) => void approvePost(text).catch((exc: Error) => setError(exc.message))}
@@ -325,6 +346,7 @@ function WritePost({
   detailing,
   writing,
   publishing,
+  reviewing,
   onDetails,
   onRevise,
   onVerify,
@@ -336,6 +358,7 @@ function WritePost({
   detailing: boolean;
   writing: boolean;
   publishing: boolean;
+  reviewing: boolean;
   onDetails: (name: string, url: string) => void;
   onRevise: (text: string) => void;
   onVerify: (name: string, url: string, detail: string) => void;
@@ -386,7 +409,7 @@ function WritePost({
         <div>
           <h3 className="font-[family-name:var(--font-serif)] text-2xl">Output</h3>
           <div className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap rounded-2xl border border-[var(--line)] p-3 text-sm leading-relaxed">{writeup}</div>
-          {verified ? (
+          {verified && !reviewing ? (
             <p className="mt-3 text-sm text-[var(--muted)]">Verified and saved. {details?.name} · {details?.url}</p>
           ) : (
             <div className="mt-3 flex flex-wrap gap-3">
@@ -394,7 +417,8 @@ function WritePost({
               <button className="btn" type="button" disabled={busy || !name.trim() || !url.trim()} onClick={() => onVerify(name.trim(), url.trim(), writeup)}>Verify</button>
             </div>
           )}
-          {changeOpen && !verified ? (
+          {reviewing && !detailing ? <p className="mt-3 text-sm text-[var(--muted)]">Verify saves this analysis and replaces the previous one.</p> : null}
+          {changeOpen && (reviewing || !verified) ? (
             <div className="mt-3">
               <textarea
                 className="min-h-24 w-full rounded-2xl border border-[var(--line)] bg-transparent px-3 py-2"
@@ -426,7 +450,7 @@ function WritePost({
       {draft?.text ? (
         <article className="mt-4 rounded-2xl border border-[var(--line)] p-4">
           <p className="whitespace-pre-wrap leading-relaxed">{draft.text}</p>
-          <p className="mt-3 text-sm text-[var(--muted)]">{draft.posted ? "Posted." : "Saved in app storage. Nothing is posted until you approve it."}</p>
+          <p className="mt-3 text-sm text-[var(--muted)]">{draft.posted ? "Posted." : "Saved in app storage. Nothing is posted until you approve it. If the post shows the product, attach a screen recording of that screen. The product link can stay in the bio and the pinned post."}</p>
           <div className="mt-3 flex flex-wrap gap-3 text-sm">
             <button type="button" className="text-[var(--gold)]" onClick={() => void navigator.clipboard.writeText(draft.text)}>Copy</button>
             {draft.intent_url ? <a className="text-[var(--gold)]" href={draft.intent_url} target="_blank" rel="noreferrer">Open composer</a> : null}

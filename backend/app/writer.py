@@ -10,12 +10,9 @@ from typing import Any, Callable
 from urllib.parse import quote
 
 from app.prompts import original_post_prompt, product_prompt, revise_analysis_prompt, rewrite_post_prompt
-from app.validation import weighted_length
+from app.validation import parse_count, shares_topic, weighted_length
 
 POST_LIMIT = 280
-MIN_TAGS = 2
-MAX_TAGS = 3
-FALLBACK_TAGS = ["#macOS", "#productivity", "#buildinpublic", "#indiehackers", "#MacApps", "#focus", "#deepwork"]
 
 _FENCE = re.compile(r"```[a-zA-Z0-9]*\n(.*?)```", re.S)
 _EMOJI = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]")
@@ -85,11 +82,14 @@ def repeats_post(candidate: str, earlier: list[str]) -> bool:
     if len(body) < 20:
         return True
     tokens = set(body.split())
+    opening = " ".join(body.split()[:3])
     for item in earlier:
         other = _body(item)
         if not other:
             continue
         if body == other:
+            return True
+        if opening and opening == " ".join(other.split()[:3]):
             return True
         shared = tokens & set(other.split())
         if shared and len(shared) / min(len(tokens), len(other.split())) >= 0.7:
@@ -110,47 +110,18 @@ def tags_from_posts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {"tag": str(item["tag"]), "why": f"Seen on posts with about {int(item['views'])} views.", "reach": "high"}
         for item in ranked[:8]
     ]
-    for tag in FALLBACK_TAGS:
-        if len(tags) >= MIN_TAGS:
-            break
-        if tag.lower() not in {str(item["tag"]).lower() for item in tags}:
-            tags.append({"tag": tag, "why": "", "reach": "medium"})
     return tags
 
 
 def finish(text: str, link: str, chosen: list[str], known: list[dict[str, Any]]) -> str:
-    """Body, then hashtags, then one canonical URL on the final line."""
-    text = _strip_code_label(text)
-    body = _URL.sub("", text)
-    body = _TAG.sub("", body)
+    """Keep the draft the model wrote. A link, emoji, or hashtag is not added."""
+    del link, chosen, known
+    body = _strip_code_label(text)
     body = "\n".join(line.rstrip() for line in body.splitlines())
     body = re.sub(r"\n{3,}", "\n\n", body).strip()
-    if not _EMOJI.search(body):
-        body += " ✨"
-    allowed = [str(row["tag"]) for row in known if row.get("tag")] or list(FALLBACK_TAGS)
-    lowered = {tag.lower(): tag for tag in allowed}
-    tags: list[str] = []
-    for tag in chosen + _TAG.findall(text):
-        canonical = lowered.get(tag.lower(), "")
-        if canonical and canonical.lower() not in {item.lower() for item in tags}:
-            tags.append(canonical)
-        if len(tags) >= MAX_TAGS:
-            break
-    for tag in allowed + FALLBACK_TAGS:
-        if len(tags) >= MIN_TAGS:
-            break
-        if tag.lower() not in {item.lower() for item in tags}:
-            tags.append(tag)
-    tail = f"\n{' '.join(tags)}\n{link}"
-    room = POST_LIMIT - weighted_length(tail)
-    if weighted_length(body) > room:
-        body = _trim(body, room)
-    if not _EMOJI.search(body):
-        mark = " ✨"
-        while weighted_length(body) + len(mark) > room and " " in body:
-            body = body[: body.rstrip().rfind(" ")].rstrip(" ,;:-–—")
-        body = body.rstrip() + mark
-    return body + tail
+    if weighted_length(body) > POST_LIMIT:
+        body = _trim(body, POST_LIMIT)
+    return body
 
 
 def taken_comment(text: str) -> str:
@@ -164,7 +135,31 @@ def taken_comment(text: str) -> str:
     return _strip_code_label(cleaned)
 
 
-def post_problem(draft: str, url: str) -> str:
+_STALE_POST = (
+    "small steps",
+    "stay consistent",
+    "fresh start",
+    "new life",
+    "keep going",
+    "trust the process",
+    "progress not perfection",
+    "progress over perfection",
+)
+_INVENTED_PROOF = (
+    "editors' choice",
+    "editor's choice",
+    "app of the day",
+    "award-winning",
+    "award winning",
+    "testimonial",
+    "users say",
+    "customers say",
+    "five stars",
+    "5 stars",
+)
+
+
+def post_problem(draft: str, url: str, *, facts: str = "", earlier: list[str] | None = None) -> str:
     """Why a ChatGPT reply is not a post yet. Empty means it can be finished."""
     text = draft.strip()
     if not text:
@@ -176,9 +171,35 @@ def post_problem(draft: str, url: str) -> str:
         return "that was a product analysis"
     if lowered.startswith(("here's", "here is", "sure,", "certainly")):
         return "that was wrapped in ChatGPT's labels"
-    if url not in text:
-        return "the product URL was missing"
+    if any(phrase in lowered for phrase in _STALE_POST):
+        return "it repeated the same motivational theme"
+    saved = facts.lower()
+    for phrase in _INVENTED_PROOF:
+        if phrase in lowered and phrase not in saved:
+            return "it claimed recognition the saved facts do not support"
+    if url and url in text and saved and not shares_topic(text, facts):
+        return "the link was added without showing a supported feature"
+    if earlier and _same_kind(text, earlier):
+        return "it used the same kind of post again"
     return ""
+
+
+def post_kind(text: str) -> str:
+    """demonstration, practical, or observation."""
+    body = text.lower()
+    if "http" in body:
+        return "demonstration"
+    if "?" in body or any(token in body for token in ("don't", "do not", "instead")):
+        return "practical"
+    return "observation"
+
+
+def _same_kind(text: str, earlier: list[str]) -> bool:
+    recent = [item for item in earlier if item.strip()][-2:]
+    if len(recent) < 2:
+        return False
+    kind = post_kind(text)
+    return all(post_kind(item) == kind for item in recent)
 
 
 def post_note(user_input: str, snapshot: dict[str, Any], earlier: list[str]) -> str:
@@ -188,9 +209,9 @@ def post_note(user_input: str, snapshot: dict[str, Any], earlier: list[str]) -> 
     if used:
         lines.append(f"A shape that has earned views here is {used}. Use it only when it still fits the note.")
     if earlier:
-        lines.append("Do not copy these earlier posts: " + " | ".join(item[:80] for item in earlier[-5:]))
+        lines.append("Do not copy these earlier posts, their openings, or their theme: " + " | ".join(item[:80] for item in earlier[-5:]))
     if tags:
-        lines.append("Hashtags to choose from: " + " ".join(str(row.get("tag") or "") for row in tags[:6]))
+        lines.append("Hashtags are optional. This account has used: " + " ".join(str(row.get("tag") or "") for row in tags[:6]))
     if user_input.strip():
         lines.append(user_input.strip())
     return "\n".join(line for line in lines if line)
@@ -247,6 +268,8 @@ def prepare_details(
             "Target users\n"
             "Audience type\n"
             f"What to use when promoting {name.strip() or 'the product'}, including the name and this URL: {url.strip()}\n"
+            "Limitations\n"
+            "In Limitations, list claims that are not supported and must not be said in a post or a reply.\n"
             "Do not write an X post."
         )
         writeup = taken_comment(complete(follow)).strip()
@@ -304,15 +327,16 @@ def compose_draft(
     if not str(details.get("writeup") or details.get("summary") or details.get("angle") or "").strip():
         raise RuntimeError("Ask ChatGPT for the details first.")
     own, replies, tags, _style, used, summary = _context(snapshot)
+    facts = str(details.get("writeup") or "")
     note = post_note(note_in, snapshot, earlier)
     raw = complete(original_post_prompt(name, url, note))
-    text, problem = _accept_post(raw, url, tags)
+    text, problem = _accept_post(raw, url, tags, facts=facts, earlier=earlier)
     if problem:
         raw = complete(rewrite_post_prompt(name, url, problem))
-        text, problem = _accept_post(raw, url, tags)
+        text, problem = _accept_post(raw, url, tags, facts=facts, earlier=earlier)
     elif repeats_post(text, earlier):
         raw = complete(rewrite_post_prompt(name, url, "it repeated an earlier post"))
-        text, problem = _accept_post(raw, url, tags)
+        text, problem = _accept_post(raw, url, tags, facts=facts, earlier=earlier)
     if problem:
         raise RuntimeError(f"ChatGPT did not return a post: {problem}")
     if repeats_post(text, earlier):
@@ -413,9 +437,9 @@ def mark_posted(path: Path, text: str, url: str) -> dict[str, Any]:
     return pending
 
 
-def _accept_post(raw: str, url: str, tags: list[dict[str, Any]]) -> tuple[str, str]:
+def _accept_post(raw: str, url: str, tags: list[dict[str, Any]], *, facts: str = "", earlier: list[str] | None = None) -> tuple[str, str]:
     draft = taken_comment(raw)
-    problem = post_problem(draft, url)
+    problem = post_problem(draft, url, facts=facts, earlier=earlier)
     if problem:
         return "", problem
     return finish(draft, url, _TAG.findall(draft), tags), ""
@@ -434,7 +458,7 @@ def _context(snapshot: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[
 def _style_note(own: dict[str, Any], replies: dict[str, Any], used: str) -> str:
     lines = [
         "Write one new post. It must not reuse the wording of any earlier post.",
-        "Include one fitting emoji and end with the product URL.",
+        "A product mention, an emoji, hashtags, and the product URL are optional.",
     ]
     if own.get("winner"):
         lines.append(f"On this account, the writing shape with the highest views is {own['winner']}.")
@@ -485,7 +509,10 @@ def _trim(body: str, room: int) -> str:
     while weighted_length(text) > room and " " in text:
         text = text[: text.rstrip().rfind(" ")].rstrip(" ,;:-–—")
     if text and not text.endswith(("…", ".", "!", "?")) and not _EMOJI.search(text[-2:]):
-        text += "…"
+        if weighted_length(text) + 1 > room and " " in text:
+            text = text[: text.rstrip().rfind(" ")].rstrip(" ,;:-–—")
+        if weighted_length(text) + 1 <= room:
+            text += "…"
     return text
 
 
@@ -496,10 +523,7 @@ def _body(text: str) -> str:
 
 
 def _views(value: object) -> int:
-    try:
-        return max(int(str(value or 0).replace(",", "")), 0)
-    except (TypeError, ValueError):
-        return 0
+    return max(parse_count(value) or 0, 0)
 
 
 def _now() -> str:

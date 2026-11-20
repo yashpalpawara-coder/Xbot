@@ -88,6 +88,11 @@ def start_coming_comments() -> dict[str, object]:
     return get_state().service.start_coming_comments()
 
 
+@router.post("/coming/post")
+def post_drafts() -> dict[str, object]:
+    return get_state().service.start_post_drafts()
+
+
 @router.get("/finder/posts")
 def list_posts(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, object]:
     return {"posts": get_state().service.list_posts(limit)}
@@ -128,6 +133,11 @@ def approve(comment_id: str, body: ApproveIn | None = None) -> dict[str, object]
 @router.post("/comments/{comment_id}/publish")
 def publish(comment_id: str, body: PublishIn) -> dict[str, object]:
     return get_state().service.start_publish(comment_id, body.idempotency_key)
+
+
+@router.post("/coming/comments/{comment_id}/post")
+def post_coming(comment_id: str, body: PublishIn) -> dict[str, object]:
+    return get_state().service.start_post_coming(comment_id, body.idempotency_key)
 
 
 @router.post("/comments/{comment_id}/confirm")

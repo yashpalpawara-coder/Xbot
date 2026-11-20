@@ -181,6 +181,7 @@ export type ComingPost = {
   comment_id?: string | null;
   reply?: string;
   status?: string;
+  country?: string;
 };
 
 export type DailyPostState = {

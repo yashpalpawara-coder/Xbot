@@ -16,6 +16,7 @@ from playwright.sync_api import BrowserContext, Page, Playwright, TimeoutError a
 from playwright.sync_api import sync_playwright
 
 from app.config import Settings
+from app.country import country_from_about, country_from_place
 from app.grok_find import LIMIT_NOTICE, limit_reached, limit_reply
 from app.writer import is_preamble
 from app.x_account import same_account
@@ -51,6 +52,34 @@ def x_login_refusal(payload: str) -> str:
 
 _TOOL_LINE = re.compile(r"^(Searched \d+ websites|Tested .+)$", re.I)
 _STATUS_LINE = re.compile(r"^(Thinking|Searching|Reasoning)(\.{3})?$", re.I)
+
+
+def chatgpt_should_switch(saved_email: str, wanted_email: str, logged_in: bool) -> bool:
+    """The open ChatGPT login is the wrong account when Settings or .env names a different email."""
+    wanted = wanted_email.strip().casefold()
+    if not wanted or not logged_in:
+        return False
+    return saved_email.strip().casefold() != wanted
+
+
+def _x_cookie(cookie: dict) -> bool:
+    domain = str(cookie.get("domain") or "").lower().lstrip(".")
+    return domain == "x.com" or domain.endswith(".x.com") or domain == "twitter.com" or domain.endswith(".twitter.com")
+
+
+def _chatgpt_cookie(cookie: dict) -> bool:
+    domain = str(cookie.get("domain") or "").lower()
+    return "chatgpt.com" in domain or "openai.com" in domain
+
+
+def _restorable_cookie(cookie: dict) -> dict:
+    allowed = ("name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite")
+    item = {key: cookie[key] for key in allowed if key in cookie and cookie[key] is not None}
+    if item.get("sameSite") not in {"Strict", "Lax", "None"}:
+        item.pop("sameSite", None)
+    if not item.get("name") or "value" not in item:
+        return {}
+    return item
 
 
 def _chatgpt_conversation(url: str) -> str:
@@ -156,7 +185,11 @@ EXTRACT_JS = """
       likes: metric(article, "like") ?? metric(article, "unlike"),
       reposts: metric(article, "retweet") ?? metric(article, "unretweet"),
       replies: metric(article, "reply"),
-      created_at: article.querySelector("time")?.getAttribute("datetime") || null
+      created_at: article.querySelector("time")?.getAttribute("datetime") || null,
+      place: ([...article.querySelectorAll("a")].find((node) => {
+        const href = node.getAttribute("href") || "";
+        return href.includes("/place/") || href.includes("place%3A") || href.toLowerCase().includes("place:");
+      })?.innerText || "").replace(/\\s+/g, " ").trim()
     });
   }
   return posts;
@@ -362,12 +395,22 @@ class BrowserSession:
                     if notice:
                         notice(message)
                     return SessionState("x", "signed_in", still, message)
-                return SessionState(
-                    "x",
-                    "needs_manual",
-                    still or current,
-                    f"Could not sign out of {who}. Sign out in the Chrome window, then select the product again.",
-                )
+                self._drop_x_cookies(page)
+                page.goto("https://x.com/i/flow/login", wait_until="domcontentloaded", timeout=45_000)
+                page = self.open_x()
+                if self.x_logged_in(page):
+                    still = self.x_handle(page)
+                    if same_account(still, username, handle):
+                        message = f"Already signed in as @{still}."
+                        if notice:
+                            notice(message)
+                        return SessionState("x", "signed_in", still, message)
+                    return SessionState(
+                        "x",
+                        "needs_manual",
+                        still or current,
+                        f"Could not sign out of {who}. Sign out in the Chrome window, then select the product again.",
+                    )
         if not str(username or "").strip() or not str(password or ""):
             return SessionState(
                 "x",
@@ -421,9 +464,39 @@ class BrowserSession:
                     button.first.click()
             except Exception:
                 logging.getLogger(__name__).info("X logout page did not finish")
-        deadline = time.time() + 12
+        deadline = time.time() + 4
         while time.time() < deadline and self._x_still_open(page):
             page.wait_for_timeout(400)
+        if self._x_still_open(page):
+            self._drop_x_cookies(page)
+            page.goto("https://x.com/i/flow/login", wait_until="domcontentloaded", timeout=45_000)
+            page.wait_for_timeout(800)
+
+    def _drop_x_cookies(self, page: Page) -> None:
+        """Remove the X login from this profile. ChatGPT cookies stay."""
+        context = self.context or page.context
+        logger = logging.getLogger(__name__)
+        try:
+            client = context.new_cdp_session(page)
+            for origin in ("https://x.com", "https://twitter.com"):
+                client.send(
+                    "Storage.clearDataForOrigin",
+                    {"origin": origin, "storageTypes": "cookies,local_storage,indexeddb,service_workers"},
+                )
+            for name in ("auth_token", "ct0", "twid"):
+                for domain in (".x.com", "x.com", ".twitter.com", "twitter.com"):
+                    client.send("Network.deleteCookies", {"name": name, "domain": domain})
+        except Exception:
+            logger.info("X storage clear did not finish")
+        cookies = context.cookies()
+        keep = [_restorable_cookie(cookie) for cookie in cookies if not _x_cookie(cookie)]
+        keep = [cookie for cookie in keep if cookie]
+        context.clear_cookies()
+        if keep:
+            try:
+                context.add_cookies(keep)
+            except Exception:
+                logger.info("Could not restore non-X cookies")
 
     def _x_still_open(self, page: Page) -> bool:
         url = page.url or ""
@@ -439,11 +512,23 @@ class BrowserSession:
         page = self.open_x()
         if self.x_logged_in(page):
             return SessionState("x", "signed_in", self.x_handle(page), "X session is signed in.")
+        page.goto("https://x.com/i/flow/login", wait_until="domcontentloaded", timeout=45_000)
+        try:
+            page.bring_to_front()
+        except Exception:
+            pass
+        if notice:
+            notice("The X login page is open. Sign in there. Automatic login starts in 5 minutes.")
+        if self._wait_until(lambda: self._safe_x_logged_in(page), wait, 300, tick=lambda: self._sync_remote(page)):
+            return SessionState("x", "signed_in", self.x_handle(page), "Signed in to X.")
+        if wait and wait():
+            return SessionState("x", "needs_manual", "", "Stopped before the X login finished.")
         username = self.settings.x_username.strip()
         password = self.settings.x_password
         if not username or not password:
             return SessionState("x", "signed_out", "", "X is signed out. Add the username and password in Settings.")
-        page.goto("https://x.com/i/flow/login", wait_until="domcontentloaded", timeout=45_000)
+        if notice:
+            notice("Signing in with the saved X login.")
         try:
             self._submit_x_login(page, username, password)
         except RuntimeError as exc:
@@ -454,6 +539,14 @@ class BrowserSession:
         if self.x_logged_in(page):
             return SessionState("x", "signed_in", self.x_handle(page), "Signed in to X.")
         return self._wait_x(page, wait, notice)
+
+    def _safe_x_logged_in(self, page: Page) -> bool:
+        try:
+            if page.is_closed():
+                return False
+            return self.x_logged_in(page)
+        except Exception:
+            return False
 
     def sign_in_if_needed(self, page: Page, wait: Callable[[], bool] | None = None) -> Page:
         """Log in with the saved X username and password when this window is signed out."""
@@ -986,12 +1079,26 @@ class BrowserSession:
         return False
 
     def ensure_chatgpt(self, wait: Callable[[], bool] | None = None) -> SessionState:
+        email, password = self._fresh_chatgpt_login()
         page = self.open_chatgpt()
         page.wait_for_timeout(1500)
-        if self.chatgpt_logged_in(page):
-            return SessionState("chatgpt", "signed_in", "", "ChatGPT session is signed in.")
-        email = self.settings.chatgpt_email.strip()
-        password = self.settings.chatgpt_password
+        logged_in = self.chatgpt_logged_in(page)
+        saved = self._saved_chatgpt_email()
+        if logged_in and not chatgpt_should_switch(saved, email, True):
+            who = email or saved
+            detail = f"Signed in to ChatGPT as {who}." if who else "ChatGPT session is signed in."
+            return SessionState("chatgpt", "signed_in", who, detail)
+        if logged_in:
+            self.sign_out_chatgpt(page)
+            page = self.open_chatgpt()
+            page.wait_for_timeout(1500)
+            if self.chatgpt_logged_in(page):
+                return SessionState(
+                    "chatgpt",
+                    "needs_manual",
+                    saved,
+                    "Could not sign out of the old ChatGPT account. Sign out in the Chrome window, then check again.",
+                )
         if not email or not password:
             return SessionState("chatgpt", "signed_out", "", "ChatGPT is signed out. Add the email and password, then check again.")
         try:
@@ -1002,8 +1109,45 @@ class BrowserSession:
         if self._challenge_visible(page):
             return self._wait_chatgpt(page, "ChatGPT is asking for a code or extra check. Finish it in the Chrome window.", wait)
         if self.chatgpt_logged_in(page):
-            return SessionState("chatgpt", "signed_in", "", "Signed in to ChatGPT.")
+            self._remember_chatgpt_email(email)
+            return SessionState("chatgpt", "signed_in", email, f"Signed in to ChatGPT as {email}.")
         return self._wait_chatgpt(page, "ChatGPT did not finish signing in. Finish it in the Chrome window.", wait)
+
+    def _fresh_chatgpt_login(self) -> tuple[str, str]:
+        """Read the ChatGPT login from .env again. A running API keeps the previous values until this."""
+        fresh = Settings()
+        email = fresh.chatgpt_email.strip()
+        password = fresh.chatgpt_password
+        self.settings.chatgpt_email = email
+        self.settings.chatgpt_password = password
+        return email, password
+
+    def _chatgpt_account_path(self) -> Path:
+        return self.settings.profile_path.parent / "chatgpt-account.txt"
+
+    def _saved_chatgpt_email(self) -> str:
+        path = self._chatgpt_account_path()
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    def _remember_chatgpt_email(self, email: str) -> None:
+        path = self._chatgpt_account_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(email.strip(), encoding="utf-8")
+
+    def sign_out_chatgpt(self, page: Page) -> None:
+        """Drop the ChatGPT and OpenAI cookies. X cookies in this profile stay."""
+        context = self.context or page.context
+        cookies = context.cookies()
+        keep = [_restorable_cookie(cookie) for cookie in cookies if not _chatgpt_cookie(cookie)]
+        keep = [cookie for cookie in keep if cookie]
+        context.clear_cookies()
+        if keep:
+            context.add_cookies(keep)
+        page.goto(self.settings.chatgpt_home_url, wait_until="domcontentloaded", timeout=45_000)
+        page.wait_for_timeout(1200)
 
     def _submit_chatgpt_login(self, page: Page, email: str, password: str) -> None:
         login = page.get_by_role("button", name="Log in").or_(page.get_by_role("link", name="Log in"))
@@ -1046,7 +1190,51 @@ class BrowserSession:
     def _wait_chatgpt(self, page: Page, detail: str, wait: Callable[[], bool] | None) -> SessionState:
         if not self._wait_until(lambda: self.chatgpt_logged_in(page), wait, tick=lambda: self._sync_remote(page)):
             return SessionState("chatgpt", "needs_manual", "", detail)
-        return SessionState("chatgpt", "signed_in", "", "Signed in to ChatGPT.")
+        email = self.settings.chatgpt_email.strip()
+        if email:
+            self._remember_chatgpt_email(email)
+        detail = f"Signed in to ChatGPT as {email}." if email else "Signed in to ChatGPT."
+        return SessionState("chatgpt", "signed_in", email, detail)
+
+    def account_country(self, handle: str, cancelled: Callable[[], bool] | None = None) -> str:
+        """Country from About this account, then from a profile location that names a country."""
+        handle = str(handle or "").strip().lstrip("@")
+        if not handle or (cancelled is not None and cancelled()):
+            return ""
+        page = self._page("x.com")
+        page.goto(f"https://x.com/{handle}", wait_until="domcontentloaded", timeout=45_000)
+        page.wait_for_timeout(1000)
+        if cancelled is not None and cancelled():
+            return ""
+        found = country_from_about(self._page_text(page))
+        if found:
+            return found
+        location = ""
+        loc = page.locator('[data-testid="UserLocation"]').first
+        try:
+            if loc.count() and loc.is_visible():
+                location = loc.inner_text() or ""
+        except Exception:
+            location = ""
+        joined = page.locator('[data-testid="UserJoinDate"]').first
+        try:
+            if joined.count() and joined.is_visible():
+                joined.click()
+                page.wait_for_timeout(800)
+                dialog = page.locator('[role="dialog"]')
+                text = dialog.first.inner_text() if dialog.count() else self._page_text(page)
+                found = country_from_about(text)
+                if found:
+                    return found
+        except Exception:
+            logging.getLogger(__name__).info("Account country dialog did not open for @%s", handle)
+        return country_from_place(location)
+
+    def _page_text(self, page: Page) -> str:
+        try:
+            return (page.locator("body").inner_text(timeout=5_000) or "")[:12000]
+        except Exception:
+            return ""
 
     def search_posts(self, query: str, limit: int, cancelled: Callable[[], bool]) -> list[dict[str, Any]]:
         page = self.open_x()
@@ -1244,6 +1432,11 @@ class BrowserSession:
         except PlaywrightTimeout:
             return False
         return bool(found)
+
+    def account_replied_here(self) -> bool:
+        """True when the signed-in account already has a reply under the open post."""
+        page = self._page("x.com")
+        return self._already_replied(page)
 
     def _click_covered(self, button) -> None:
         """Click even when X draws a mask over the button."""
@@ -1594,10 +1787,9 @@ class BrowserSession:
     ) -> str:
         known = {" ".join(item.split()) for item in before}
         known.add(" ".join(prompt.split()))
-        deadline = time.time() + 240
         stable = ""
         stable_hits = 0
-        while time.time() < deadline:
+        while True:
             if cancelled and cancelled():
                 raise RuntimeError("Stopped while waiting for ChatGPT.")
             replies = [item for item in self._assistant_replies(page) if " ".join(item.split()) not in known]
@@ -1621,21 +1813,13 @@ class BrowserSession:
             if tracked and stable_hits >= max(1, settle) and not busy:
                 return tracked
             page.wait_for_timeout(1000)
-        if self._chatgpt_busy(page):
-            raise RuntimeError("ChatGPT has not finished the reply. The next message was not sent.")
-        if stable and " ".join(stable.split()) not in known:
-            return stable
-        raise RuntimeError("ChatGPT did not finish the product details.")
 
     def _wait_for_chatgpt_reply(self, page: Page, cancelled: Callable[[], bool] | None) -> None:
         """Do not type the next message while the previous reply is still being written."""
-        if not self._chatgpt_busy(page):
-            return
-        finished = self._wait_until(lambda: not self._chatgpt_busy(page), cancelled, seconds=240)
-        if cancelled and cancelled():
-            raise RuntimeError("Stopped while waiting for ChatGPT.")
-        if not finished or self._chatgpt_busy(page):
-            raise RuntimeError("ChatGPT is still writing the previous reply. The next message was not sent.")
+        while self._chatgpt_busy(page):
+            if cancelled and cancelled():
+                raise RuntimeError("Stopped while waiting for ChatGPT.")
+            page.wait_for_timeout(1000)
 
     def _chatgpt_busy(self, page: Page) -> bool:
         """True while ChatGPT is still producing the current reply."""

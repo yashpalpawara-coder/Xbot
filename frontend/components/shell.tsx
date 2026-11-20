@@ -5,13 +5,14 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { request } from "@/lib/api";
-import type { Job, ProductChoice } from "@/lib/types";
+import type { ComingPost, Job, ProductChoice } from "@/lib/types";
 import { useJob } from "@/lib/use-job";
 
 const links = [
   ["/", "Overview"],
   ["/finder", "Finder"],
   ["/coming", "Coming"],
+  ["/drafts", "Drafts"],
   ["/saved", "Library"],
   ["/analytics", "Analysis"],
   ["/ranks", "Ranks"],
@@ -25,6 +26,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const [jobId, setJobId] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const [failed, setFailed] = useState(false);
+  const [drafts, setDrafts] = useState(0);
   const job = useJob(jobId);
   const locked = job?.status === "running";
   const shown = products.some((product) => product.id === selected) ? selected : products[0]?.id || "";
@@ -33,6 +35,12 @@ export function Shell({ children }: { children: React.ReactNode }) {
     const body = await request<{ products: ProductChoice[]; selected_id: string }>("/api/products");
     setProducts(body.products || []);
     setSelected(body.selected_id || "");
+    try {
+      const coming = await request<{ posts: ComingPost[] }>("/api/finder/coming");
+      setDrafts((coming.posts || []).filter((post) => post.status === "drafted").length);
+    } catch {
+      setDrafts(0);
+    }
   }
 
   useEffect(() => {
@@ -98,6 +106,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             return (
               <Link key={href} href={href} className={active ? "active" : ""}>
                 {label}
+                {href === "/drafts" && drafts > 0 ? <span className="nav-count">{drafts}</span> : null}
               </Link>
             );
           })}

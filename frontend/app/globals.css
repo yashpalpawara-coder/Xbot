@@ -56,9 +56,24 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .nav { display: flex; flex-direction: column; gap: 6px; margin-top: 22px; }
 
 .nav a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   border-radius: 12px;
   padding: 10px 12px;
   color: var(--muted);
+}
+
+.nav-count {
+  min-width: 1.4rem;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(226, 182, 87, 0.18);
+  color: var(--gold);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
 }
 
 .nav a.active, .nav a:hover {

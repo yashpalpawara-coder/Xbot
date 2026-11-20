@@ -43,7 +43,7 @@ class ProductAnalyzeIn(BaseModel):
 
 
 class ProductReviseIn(BaseModel):
-    text: str = Field(min_length=1, max_length=1000)
+    text: str = Field(min_length=1)
 
 
 class GrokFindIn(BaseModel):
@@ -98,6 +98,9 @@ class AnalysisBody(BaseModel):
     risks: str
     reply_angle: str
     relevance: int = Field(ge=0, le=100)
+    product_fit: str = ""
+    author_intention: str = ""
+    decision: str = ""
 
 
 class CommentBody(BaseModel):

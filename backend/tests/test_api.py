@@ -189,6 +189,34 @@ def test_overview_posts_are_only_the_latest_original_posts(tmp_path, monkeypatch
     assert scan["handle"] == "VimVo60"
 
 
+def test_a_long_change_note_is_not_cut_at_1000_characters(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    response = client.post("/api/post/details/revise", json={"text": "Keep the full analysis. " * 200})
+    assert response.status_code == 409
+    assert "1000" not in response.text
+
+
+def test_verifying_again_replaces_the_saved_analysis(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    first = "Ted is a Mac app. It asks for three tasks and is for people who work on a Mac."
+    _verify(client, tmp_path, "Ted", "https://tedcoachai.com", first, True)
+    second = "Ted is a quiet Mac app. It lives in the notch and asks for three morning tasks."
+    (tmp_path / "daily_post.json").write_text(
+        json.dumps({"posts": [], "details": {"writeup": second, "name": "Ted", "url": "https://tedcoachai.com", "verified": False}}),
+        encoding="utf-8",
+    )
+    saved = client.post(
+        "/api/post/details/verify",
+        json={"name": "Ted", "url": "https://tedcoachai.com", "detail": second, "for_finder": True},
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["product"]["detail"] == second
+    assert client.get("/api/product").json()["product"]["detail"] == second
+    today = client.get("/api/post/today").json()
+    assert today["details"]["writeup"] == second
+    assert today["details"]["verified"] is True
+
+
 def test_saved_product_fills_the_analysis_form_without_the_local_file(tmp_path, monkeypatch) -> None:
     client = _client(tmp_path, monkeypatch)
     detail = "Vimvo is a voice app. It turns a spoken note into a short written post."
@@ -420,3 +448,127 @@ def test_publish_requires_approval(tmp_path, monkeypatch) -> None:
     client = _client(tmp_path, monkeypatch)
     missing = client.post("/api/comments/11111111-1111-1111-1111-111111111111/publish", json={"idempotency_key": "key-123456"})
     assert missing.status_code == 404
+
+
+def test_post_replies_sends_drafts_without_approval(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    detail = "Ted is a Mac app. It asks for three tasks and is for people who work on a Mac."
+    product = _verify(client, tmp_path, "Ted", "https://tedcoachai.com", detail, True)
+    from app.browser_session import SessionState
+    from app.state import get_state
+
+    state = get_state()
+    state.store.add_comment(
+        {
+            "id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "post_id": "11111111-1111-1111-1111-111111111111",
+            "text": "That Monday list is the whole point.",
+            "variant": "coming",
+            "version": 1,
+            "status": "draft",
+            "idempotency_key": None,
+            "created_at": "2026-11-17T00:00:00+00:00",
+            "updated_at": "2026-11-17T00:00:00+00:00",
+        }
+    )
+    state.store.add_coming(
+        [
+            {
+                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "external_id": "draft-1",
+                "url": "https://x.com/a/status/1",
+                "product_id": product["id"],
+                "status": "drafted",
+                "reply": "That Monday list is the whole point.",
+                "comment_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            },
+            {
+                "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "external_id": "draft-2",
+                "url": "https://x.com/a/status/2",
+                "product_id": product["id"],
+                "status": "drafted",
+                "reply": "The walk after lunch is the part that stuck.",
+            },
+            {
+                "id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+                "external_id": "saved-1",
+                "url": "https://x.com/a/status/3",
+                "product_id": product["id"],
+                "status": "saved",
+                "reply": "",
+            },
+        ]
+    )
+    sent: list[tuple[str, str]] = []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def use_x_account(self, username, password, handle, wait, notice):
+            return SessionState("x", "signed_in", "ted", "Signed in.")
+
+        def reply(self, url, text):
+            sent.append((url, text))
+            if url.endswith("/2"):
+                raise RuntimeError("X left the reply button disabled. Nothing was sent.")
+            return "published"
+
+        def drop_reply(self, url, text):
+            raise AssertionError("posting a reply must not like the post")
+
+    monkeypatch.setattr("app.services.BrowserSession", lambda settings: FakeSession())
+    job = {
+        "id": "job-post",
+        "type": "coming_post",
+        "status": "running",
+        "progress": 0,
+        "message": "",
+        "error": None,
+        "results_count": 0,
+        "logs": [],
+        "result": None,
+        "created_at": "",
+        "updated_at": "",
+        "cancel": threading.Event(),
+    }
+    state.jobs._jobs[job["id"]] = job
+    rows = [row for row in state.store.list_coming(product["id"]) if row.get("external_id") in {"draft-1", "draft-2"}]
+    rows.sort(key=lambda row: str(row.get("external_id") or ""))
+    slept: list[float] = []
+    monkeypatch.setattr("app.services.time.sleep", lambda seconds: slept.append(seconds))
+    result = state.service._post_drafts(job, rows, state.store.get_product(product["id"]))
+    assert slept == [1] * 120
+    assert result == {"posted": 1, "missed": 1}
+    assert sent == [
+        ("https://x.com/a/status/1", "That Monday list is the whole point."),
+        ("https://x.com/a/status/2", "The walk after lunch is the part that stuck."),
+    ]
+    by_id = {row["external_id"]: row for row in state.store.list_coming(product["id"])}
+    assert by_id["draft-1"]["status"] == "published"
+    assert by_id["draft-2"]["status"] == "drafted"
+    assert by_id["saved-1"]["status"] == "saved"
+    assert state.store.get_comment("cccccccc-cccc-cccc-cccc-cccccccccccc")["status"] == "published"
+
+    state.store.update_coming("draft-2", {"status": "skipped", "reply": "held"}, product["id"])
+    empty = client.post("/api/coming/post")
+    assert empty.status_code == 409
+    state.store.update_coming(
+        "draft-2",
+        {"status": "drafted", "reply": "The walk after lunch is the part that stuck."},
+        product["id"],
+    )
+    started: list[str] = []
+
+    def fake_start(kind, work):
+        started.append(kind)
+        return {"id": "job-2", "type": kind, "status": "running", "progress": 0, "message": "Starting", "error": None, "results_count": 0, "logs": [], "result": None}
+
+    monkeypatch.setattr(state.jobs, "start", fake_start)
+    queued = client.post("/api/coming/post")
+    assert queued.status_code == 200
+    assert started == ["coming_post"]

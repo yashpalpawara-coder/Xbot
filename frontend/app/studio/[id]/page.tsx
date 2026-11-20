@@ -152,7 +152,7 @@ export default function StudioPage() {
             <input type="checkbox" checked={allowPromotion} onChange={(event) => setAllowPromotion(event.target.checked)} />
             Allow a {settings?.product_name || "product"} mention when it fits
           </label>
-          <button className="btn mt-4" type="button" onClick={generate} disabled={job?.status === "running"}>Generate three replies</button>
+          <button className="btn mt-4" type="button" onClick={generate} disabled={job?.status === "running"}>Generate a reply</button>
         </section>
         <section className="space-y-3">
           {(detail?.comments || []).length === 0 ? <p className="text-[var(--muted)]">No drafts yet.</p> : null}

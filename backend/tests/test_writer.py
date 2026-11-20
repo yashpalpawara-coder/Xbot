@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from app.validation import weighted_length
-from app.writer import compose_draft, finish, mark_posted, preferred_style, prepare_details, public_state, rank_styles, repeats_post, store_details, store_draft, writing_style
+from app.writer import compose_draft, finish, mark_posted, post_problem, preferred_style, prepare_details, public_state, rank_styles, repeats_post, store_details, store_draft, writing_style
 
 
 def test_style_names_the_shape() -> None:
@@ -64,6 +64,7 @@ def test_long_reply_still_needs_the_missing_sections() -> None:
     finished = (
         partial
         + "\nTarget users\nAdults building routines.\nAudience type\nWellness.\n"
+        + "Limitations\nNo calorie tracking.\n"
         + "https://apps.apple.com/in/app/vimvo-60-day-reset-challenge/id6828568240\n"
     )
     assert not _analysis_incomplete(finished, asked)
@@ -77,11 +78,22 @@ def test_opening_line_is_not_the_product_details() -> None:
     assert not is_preamble("Ted is a Mac app. " * 80)
 
 
-def test_finish_keeps_the_link_last_and_the_length_limit() -> None:
+def test_a_post_cannot_repeat_the_motivational_theme_or_invent_proof() -> None:
+    facts = "Ted is a Mac notch app. It asks for up to three tasks."
+    assert post_problem("Small steps help you stay consistent.", "https://tedcoachai.com", facts=facts) == "it repeated the same motivational theme"
+    assert "recognition" in post_problem("Ted is an award-winning notch app.", "https://tedcoachai.com", facts=facts)
+    shown = "Three tasks sit in the notch before the day gets loud.\nhttps://tedcoachai.com"
+    assert post_problem(shown, "https://tedcoachai.com", facts=facts) == ""
+    assert "feature" in post_problem("Look at this.\nhttps://tedcoachai.com", "https://tedcoachai.com", facts="A calendar for school exams.")
+    earlier = ["Monday felt busy.", "Thursday felt busy too."]
+    assert post_problem("Sunday felt busy as well.", "https://tedcoachai.com", earlier=earlier) == "it used the same kind of post again"
+
+
+def test_finish_does_not_force_a_link_or_hashtags() -> None:
     text = finish("A quiet morning list " * 40, "https://tedcoachai.com", ["#nope"], [{"tag": "#macOS"}, {"tag": "#productivity"}])
-    assert text.endswith("https://tedcoachai.com")
-    assert "#macOS #productivity" in text
-    assert "✨" in text
+    assert "https://tedcoachai.com" not in text
+    assert "#macOS" not in text
+    assert "✨" not in text
     assert weighted_length(text) <= 280
 
 
@@ -103,6 +115,7 @@ def test_compose_uses_the_saved_scan_and_stores_a_draft(tmp_path: Path) -> None:
             "Target users\nPeople who want a short daily list.\n"
             "Audience type\nMac users.\n"
             "Use this URL when promoting Ted: https://tedcoachai.com\n"
+            "Limitations\nIt does not track calories.\n"
         )
 
     details = prepare_details(snapshot, name="Ted", url="https://tedcoachai.com", pitch="A Mac notch app.", complete=details_complete)

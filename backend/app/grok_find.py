@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import re
 
+from app.prompts import product_brief
+from app.validation import parse_count
+
 _STATUS = re.compile(
     r"https?://(?:www\.)?(?:x|twitter)\.com/(?P<handle>[A-Za-z0-9_]{1,30})/status/(?P<id>\d+)",
     re.I,
 )
-_COUNT = re.compile(r"([\d,]+)\s*(views|impressions)", re.I)
+_COUNT = re.compile(r"(\d[\d,]*(?:\.\d+)?\s*[kmb]?)\s*(views|impressions)", re.I)
 
 
 def product_message(name: str, url: str, detail: str) -> str:
@@ -37,11 +40,12 @@ def find_message(count: int = 20) -> str:
         "Using the product you already have in this chat, find posts where that audience is already talking.\n"
         "Search the content universe around the product: the problems, habits, and topics those people discuss. "
         "Do not search for the product name, a download, or an advertisement.\n"
-        "Keep a post when a thoughtful reply could add one insight. A smaller creator with the right audience is better than a huge unrelated post.\n"
+        "Keep a post when a thoughtful reply could add one insight. Prefer a question or a specific situation. A high view count on its own is not a reason to choose a post. A smaller creator with the right audience is better than a huge unrelated post.\n"
         "Skip posts that are only a link, a giveaway, generic praise, or an unrelated trend.\n"
         f"Return {count} posts.\n"
         "Give the URL of each post.\n"
         f"Keep a post only when it shows more than {VIEW_MIN} views or more than {VIEW_MIN} impressions.\n"
+        "Include recent conversations that already clear that line, and older conversations when people are still replying. Do not return only the oldest or the highest-view posts.\n"
         "Use posts you actually found on X."
     )
 
@@ -55,7 +59,7 @@ CREATOR_COUNT = 10
 QUERY_COUNT = 30
 POSTS_PER_QUERY = 1
 SEARCH_SCAN = 8
-QUERY_PAUSE_SECONDS = 5
+QUERY_PAUSE_SECONDS = 30
 
 _FENCED = re.compile(r"```[^\n]*\n(.*?)```", re.S)
 _LINE_PREFIX = re.compile(r"^(?:[-*•]+|\d{1,3}[.)\]:-])\s*")
@@ -100,7 +104,7 @@ def creators_message(name: str, url: str, analysis: str) -> str:
         "whose audience already discusses this product's problems.\n"
         f"Name: {name.strip()}\n"
         f"Product URL: {url.strip()}\n"
-        f"Analysis:\n{analysis.strip()[:4000]}\n"
+        f"Analysis:\n{product_brief(analysis)}\n"
         "Mix smaller and medium creators. Skip huge unrelated accounts.\n"
         f"Return exactly {CREATOR_COUNT} lines. One handle per line, without the @ sign.\n"
         "No numbering, no explanation, and no URL."
@@ -132,9 +136,8 @@ def over_view_threshold(views: object, minimum: int = VIEW_MIN) -> bool:
     """Same rule as Grok: a missing count stays, a count of 500 or under is dropped."""
     if views is None or views == "":
         return True
-    try:
-        count = int(str(views).replace(",", ""))
-    except (TypeError, ValueError):
+    count = parse_count(views)
+    if count is None:
         return True
     return count > minimum
 
@@ -146,11 +149,13 @@ def search_queries_message(name: str, url: str, analysis: str) -> str:
         "that find conversations this product can usefully join.\n"
         f"Name: {name.strip()}\n"
         f"Product URL: {url.strip()}\n"
-        f"Analysis:\n{analysis.strip()[:6000]}\n"
+        f"Analysis:\n{product_brief(analysis)}\n"
         "Search the content universe: the audience's problems, habits, and the words they already use. "
         "Do not search for the product name, the word download, or an advertisement.\n"
         "Each query should find posts where one thoughtful reply can add an insight. "
         "Include smaller creators whose audience is the right people, not only the biggest accounts.\n"
+        "Mix queries that can match a conversation from this week with queries that can still find an older thread people reply to. "
+        "Do not add since: or until:.\n"
         "Do not use unrelated trends, giveaways, or posts that are only a link.\n"
         f"Return exactly {QUERY_COUNT} lines. One search query per line.\n"
         "No numbering, no quotes, and no explanation.\n"
@@ -193,7 +198,7 @@ def posts_from_reply(text: str) -> list[dict[str, object]]:
         line_end = text.find("\n", match.end())
         next_end = text.find("\n", line_end + 1) if line_end >= 0 else -1
         line = text[line_start : next_end if next_end >= 0 else len(text)]
-        counts = [int(item.group(1).replace(",", "")) for item in _COUNT.finditer(line)]
+        counts = [count for count in (parse_count(item.group(1)) for item in _COUNT.finditer(line)) if count is not None]
         if counts and not over_view_threshold(max(counts)):
             continue
         seen.add(status_id)

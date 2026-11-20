@@ -16,6 +16,7 @@ class JobManager:
     def __init__(self, store: Any) -> None:
         self.store = store
         self._jobs: dict[str, dict[str, Any]] = {}
+        self._running_id = ""
         self._guard = threading.Lock()
         self.browser_lock = threading.Lock()
         self._reserve = threading.Lock()
@@ -99,6 +100,7 @@ class JobManager:
         }
         with self._guard:
             self._jobs[job_id] = job
+            self._running_id = job_id
         try:
             self.store.upsert_job(self.public(job))
         except Exception:
@@ -114,6 +116,9 @@ class JobManager:
             except Exception as exc:
                 self.update(job_id, status="error", error=str(exc), message=str(exc))
             finally:
+                with self._guard:
+                    if getattr(self, "_running_id", "") == job_id:
+                        self._running_id = ""
                 self.browser_lock.release()
 
         threading.Thread(target=runner, daemon=True, name=f"xbot-{kind}").start()

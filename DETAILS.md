@@ -91,9 +91,10 @@ The shell lists every saved product and switches the X login when the selection 
 | --- | --- | --- |
 | `/` | Overview | Session checks for X and ChatGPT, recent posts, recent jobs |
 | `/analytics` | Analysis | Ask ChatGPT to read the product page, revise the writeup, verify it |
-| `/ranks` | Ranks | The last activity scan, ranked: top 5 posts and top 5 comments by views, overall and from today |
+| `/ranks` | Ranks | Top 5 posts and comments by views, plus a day-by-day view comparison, why posts show no likes, and how today's comments differ from yesterday's |
 | `/finder` | Finder | Verify the product for finding, run Grok find, or search X directly |
 | `/coming` | Coming | The selected product's saved posts, then one reply each |
+| `/drafts` | Drafts | Replies that are written and still waiting for approval. The nav shows how many are waiting. |
 | `/saved` | Library | Bookmarked posts, searches, comments, and creators |
 | `/posts/[id]` | Post | One collected post, its metrics, analysis, and comments |
 | `/studio/[id]` | Studio | Analyse a post, draft three replies, approve one, publish it |
@@ -171,7 +172,7 @@ Finder has two ways in.
 
 **Grok find.** `POST /api/finder/grok` with `count` from 1 to 100.
 
-1. Sign into the selected product's X account.
+1. Sign into the selected product's X account. If X is signed out, the login page stays open for 5 minutes so the sign-in can be finished by hand. After 5 minutes, the saved username and password are submitted. Stop cancels the wait.
 2. Open Grok in that Chrome profile and send `product_message`. This pastes the verified name, URL, and detail, and tells Grok not to search yet.
 3. Send `find_message`. Grok should return posts from the audience's content universe: problems, habits, and topics from the analysis. It should skip ads, giveaways, bare links, and unrelated trends. A smaller creator with the right audience is preferred over a huge unrelated account. Each kept post needs a real status URL and more than 500 views or impressions when a count is shown.
 4. Up to seven follow-ups ask for `count` more posts. The loop stops when the job is cancelled, a batch adds nothing new, or Grok's limit is reached.
@@ -188,36 +189,38 @@ If that banner is up, or Grok never finishes the post reply, Find stops asking G
 2. Run the same product analysis as Analysis: read the page and write What it is, Features, Target users, Audience type, and the promotion facts.
 3. In that same chat, ask for 10 creators whose audience already discusses the product's problems, then 30 X search queries. The queries use the audience's words. They do not search for the product name, "download", or a URL.
 4. Save both lists on the product, as `creators` and `search_queries`, and save each search as a search row. Finder shows them under Saved creators and Saved search queries.
-5. Search X with each query, then with `from:handle` for each creator. Keep one post from each search, and only when it shows more than 500 views or the view count is missing. A post with 500 views or fewer is skipped, the same rule Grok uses.
-6. Wait 5 seconds after each search before the next. Stop cancels the wait.
+5. Search X on Latest with each query, then with `from:handle` for each creator. Latest is why a new match can appear before an old one. Keep one post from each search, and only when it shows more than 500 views or the view count is missing. A shown count of 500 or fewer is skipped. Among the posts that clear that line, the pick is the better reply: overlap with the saved analysis or the search query, a real question or a specific situation, a recent reply when the time is known, and how recently the post was published. Views are not the ranking. An older post stays eligible and can win when the conversation is still the better reply. A newer post can win for the same reason. A weak match is left out. A post this account already replied to is not drafted again.
+6. Wait 30 seconds after each search before the next. Stop cancels the wait.
+7. Each kept post gets a country. Finder uses the place on the post when that place names a country. Otherwise it waits 30 seconds, then opens the author's profile once and reads Account based in. The same author is not opened again during that find. Stop cancels the wait. A profile location counts only when the text itself names a country. A post with none of those is Unknown. Finder then shows a country table and a country dropdown. Choosing a country shows only that country's posts. Posts saved before this field existed stay Unknown until a later find stores a country.
 
-### 5. Write and send coming replies
+### 5. Draft coming replies
 
-Coming lists the selected product's saved posts. `POST /api/coming/comment` walks the rows whose status is `saved` or `drafted`.
+Coming lists the selected product's saved posts. A country dropdown and table filter that list. The page also shows the last X login and an X login button. That button opens the X page for 5 minutes, then uses the saved login if the account is still signed out. `POST /api/coming/comment` walks rows whose status is `saved`. A list that already has drafts and nothing new returns a review message. Nothing in this job is published.
 
 For each post:
 
-1. Open the status and load the comments under it. Each comment keeps its text, length, likes, replies, and views.
-2. Skip the post unless it shows more than 500 views and at least 5 comments. A post that cannot be opened, or whose comments cannot be read, is skipped.
-3. Ask ChatGPT, in the product chat, to study every loaded comment first: which kind has high views, good likes, and good replies, and how long those comments are. Then write one reply in that kind, the way a person types on X: one spoken thought, contractions, no essay voice and no em dash. An emoji is optional and is used only when the comments people liked use one. The reply still has to stand on its own if the account name is hidden. It uses one detail from the post, then one insight about the author's problem. The product is named only when one saved fact answers that point. The reply has no download line, no link, and no hashtag.
-4. `reply_problems` rejects an empty reply, a hashtag, generic praise, a link, a download pitch, a reply written as a user of the product, a reply under about 20 letters, or a reply over 260 weighted characters. One rewrite is attempted. A reply that still fails is marked `skipped`.
-5. The reply is posted on that status, then that post is liked.
-6. The job waits 30 seconds before the next post.
+Draft replies waits 30 seconds before each post after the first. Stop cancels the wait.
 
-Coming status moves through `saved`, `drafted`, `posting`, then `published` or `uncertain`. `uncertain` means the click was sent and the reply was not confirmed on the page. It is not sent again automatically.
+1. Open the status and load the comments under it. Each comment keeps its text, length, likes, replies, and views. A post with no comments can still be drafted.
+2. Skip a post unless it shows more than 500 views, or likes, replies, and reposts together are more than 500. A missing view count does not pass on its own. Then skip a personal health disclosure, a conversation this account already replied to, and a post that shares no topic with the saved analysis. A question mark by itself is not enough to keep it. A specific situation, such as a missed workout or a routine, can still be drafted. Age does not remove it. A post that cannot be opened is skipped.
+3. Ask ChatGPT, in the product chat, for one reply or a `SKIP` line. The reply is in the post's language, refers to something the author wrote, and names the product only when a saved fact answers that point. A link is included only when the author asked for an app, a product, or a link. The full saved analysis is passed, including limitations.
+4. `reply_problems` rejects an empty reply, a hashtag, generic praise, generic motivation, an unasked link, a download pitch, a reply written as a user of the product, a reply that does not address the post, a question that misses the point, a claim the saved features do not support, a reply that repeats a recent reply, a reply under about 20 letters, a reply over 280 weighted characters, or a reply whose quality score is under 70. The score is specific relevance up to 30, a useful addition up to 25, naturalness up to 18, originality 15, and accuracy up to 8. Sharing a keyword, including a number, or using a contraction is not enough to pass. A skip or a failed check sets that score to 0. One rewrite is attempted. A reply that still fails, or a `SKIP`, is marked `skipped`.
+5. A reply that passes is stored as a draft with status `drafted`. It appears on Coming and on the Drafts screen. Drafting does not post it and does not like the post.
+
+`POST /api/coming/post` is the Post replies button on Coming and on Drafts. It sends every drafted reply for the selected product from the signed-in account. That click is the approval, so the drafts do not need a separate approve step. It waits 2 minutes after each reply before the next one. Stop cancels the wait. A reply that fails to send stays `drafted`. A reply that cannot be confirmed is `uncertain` and is not sent again. The job does not like the post. The studio page can still approve and publish one reply on its own.
 
 ### 6. Studio path for one post
 
 This is separate from the coming queue.
 
-1. `POST /api/posts/{id}/analyse` asks ChatGPT for a JSON analysis: topic, message, audience, context, engagement, opportunity, risks, reply angle, and relevance from 0 to 100.
-2. `POST /api/posts/{id}/comments` asks for three replies: `natural`, `insightful`, and `question`. `should_reply` can be false when the post is a poor fit. Promotion follows the setting: off means no product and no link. On means the product is mentioned only when a saved fact fits, and still without a download link.
+1. `POST /api/posts/{id}/analyse` asks ChatGPT for a JSON analysis: topic, message, audience, context, engagement, opportunity, risks, reply angle, relevance from 0 to 100, product fit, author intention, and a REPLY or SKIP decision.
+2. `POST /api/posts/{id}/comments` asks for one reply in `natural`. `should_reply` is false when the right outcome is to skip. The old `insightful` and `question` fields stay in the response so earlier drafts still load. Promotion follows the setting. A link is allowed only when the author asked for one and promotion is on.
 3. The operator can edit, regenerate one variant, and approve.
 4. Publish needs an `idempotency_key`. The same key does not send the reply twice. The publish event is `published` or `uncertain`.
 
 ### 7. Original daily post
 
-After the product analysis is verified, `POST /api/post/today` writes one original post in the same ChatGPT chat. It is the account's own post, in the product's voice, not a reply. `POST /api/post/approve` publishes the approved text from the X composer.
+After the product analysis is verified, `POST /api/post/today` writes one original post in the same ChatGPT chat. It picks a different kind from the recent posts: a relatable moment, a practical tip, or a demonstration of one supported feature. The product name and the URL stay off the first two kinds. A demonstration can include the URL once, and the owner attaches a real screen recording before approving it. A draft is rejected when it repeats an opening, repeats the same kind twice in a row, falls back to small steps or stay consistent, or claims an award or a testimonial the saved analysis does not contain. `POST /api/post/approve` publishes the approved text from the X composer. Nothing is posted until that approval.
 
 ### 8. Activity scan
 
@@ -355,6 +358,7 @@ All routes are under `/api`. Errors use `{ "error": { "code": "...", "message": 
 | GET | `/finder/coming` | | coming rows for the selected product |
 | GET | `/finder/posts` | `limit` | posts for the selected product |
 | POST | `/coming/comment` | | starts the reply queue |
+| POST | `/coming/post` | | posts every drafted reply without a separate approval |
 | GET | `/posts/{id}` | | post, metrics, analysis, comments |
 | POST | `/posts/{id}/analyse` | | starts analysis |
 | POST | `/posts/{id}/comments` | `{allow_promotion?}` | starts three drafts |

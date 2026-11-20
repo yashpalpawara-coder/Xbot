@@ -18,9 +18,12 @@ node_modules/
 *.tsbuildinfo
 
 backend/data/chrome-profile/
+backend/data/chatgpt-account.txt
 backend/data/ms-playwright/
 backend/data/store.json
 backend/data/activity.json
+backend/data/activity-*.json
+backend/data/chatgpt-*.png
 backend/data/daily_post.json
 backend/data/*.tmp
 *.db

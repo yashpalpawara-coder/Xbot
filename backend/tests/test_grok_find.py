@@ -2,7 +2,7 @@ import threading
 
 from fastapi.testclient import TestClient
 
-from app.browser_session import SessionState, _chatgpt_conversation, _grok_conversation
+from app.browser_session import SessionState, _chatgpt_conversation, _chatgpt_cookie, _grok_conversation, chatgpt_should_switch
 from app.config import get_settings
 from app.grok_find import (
     CREATOR_COUNT,
@@ -23,6 +23,16 @@ from app.grok_find import (
 )
 from app.main import create_app
 from app.state import get_state, reset_state
+
+
+def test_a_different_chatgpt_email_replaces_the_open_session() -> None:
+    assert chatgpt_should_switch("", "new@example.com", True)
+    assert chatgpt_should_switch("old@example.com", "new@example.com", True)
+    assert not chatgpt_should_switch("new@example.com", "new@example.com", True)
+    assert not chatgpt_should_switch("old@example.com", "", True)
+    assert _chatgpt_cookie({"domain": ".chatgpt.com"})
+    assert _chatgpt_cookie({"domain": "auth.openai.com"})
+    assert not _chatgpt_cookie({"domain": ".x.com"})
 
 
 def test_chatgpt_comment_stays_on_one_chat_id() -> None:

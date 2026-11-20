@@ -12,7 +12,9 @@ def test_reply_uses_the_same_chat_prompt() -> None:
     assert "I use Ted" in message
     assert "the way a person types a reply on X" in message
     assert "interesting if the account name is hidden" in message
-    assert "Do not add a link" in message
+    assert "do not add a link" in message
+    assert "SKIP:" in message
+    assert "same language" in message
     assert message.endswith("Put only the finished reply in one code block, so the copy box contains the reply and nothing else.")
     assert "https://tedcoachai.com" in message
     assert "Mac app" not in message
@@ -40,15 +42,18 @@ def test_reply_uses_the_same_chat_prompt() -> None:
         ]
     )
     longer = "A longer comment people actually replied to, with one concrete step."
-    assert notes.index("40 likes") < notes.index("1 likes")
+    assert notes.index("1 likes") < notes.index("40 likes")
+    assert "Do not imitate" in notes
     assert f"{len(longer)} characters" in notes
     styled = reply_prompt(post, "https://x.com/Helios_Movement/status/2118251689379533184", name="Ted", url="https://tedcoachai.com", comments=[{"text": "A longer comment people actually replied to.", "likes": 40, "replies": 6, "views": 900}])
-    assert "Study every one before you write." in styled
+    assert "Do not copy their wording." in styled
     assert "An emoji is optional." in styled
     assert reply_gate(2400, 8) == ""
-    assert reply_gate(500, 8) == "This post is under 500 views."
-    assert reply_gate(None, 8) == "This post is under 500 views."
-    assert reply_gate(900, 4) == "This post has fewer than 5 comments."
+    assert "500" in reply_gate(500, 8)
+    assert "500" in reply_gate(None, 8)
+    assert reply_gate(900, 4) == ""
+    assert "500" in reply_gate(12, 0)
+    assert reply_gate(120, 10, likes=600) == ""
     assert engagement_count(2, 6) == 6
     assert taken_reply("Sure\n```\nThe notch is useful when the next task stays visible.\n```") == "The notch is useful when the next task stays visible."
     labeled = "Plain text The notch keeps the next task visible after the novelty fades."
