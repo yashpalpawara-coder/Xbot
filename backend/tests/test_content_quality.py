@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from app.grok_find import creators_message, over_view_threshold, posts_from_reply, search_queries_message
 from app.prompts import comments_prompt, original_post_prompt, product_brief, revise_analysis_prompt
-from app.reply_rules import choose_post, comment_notes, conversation_rank, engagement_count, reply_gate, reply_outcome, reply_problems, reply_prompt, reply_quality
+from app.reply_rules import choose_post, choose_posts, comment_notes, conversation_rank, engagement_count, reply_gate, reply_outcome, reply_problems, reply_prompt, reply_quality
 from app.validation import parse_count
 from app.writer import repeats_post
 
@@ -230,3 +230,21 @@ def test_keyword_overlap_a_number_or_a_contraction_cannot_pass_alone() -> None:
     assert int(reply_quality(contracted, name="VimVo", url="https://example.com", post_text=HEALTH, facts=FACTS)["score"]) < 70
     question = "Have you tried Apple Health steps?"
     assert any("question" in item for item in reply_problems(question, name="VimVo", url="https://example.com", post_text=HEALTH, facts=FACTS))
+
+
+def test_a_query_tries_for_five_posts_and_drops_a_low_view_post() -> None:
+    now = datetime(2026, 11, 20, tzinfo=timezone.utc)
+    posts = [
+        {
+            "external_id": str(index),
+            "handle": f"h{index}",
+            "text": "mac storage full again",
+            "views": 800,
+            "created_at": "2026-11-19T00:00:00+00:00",
+        }
+        for index in range(7)
+    ]
+    posts.append({"external_id": "low", "handle": "quiet", "text": "mac storage full again", "views": 100, "created_at": "2026-11-19T00:00:00+00:00"})
+    kept = choose_posts(posts, facts=FACTS, query="mac storage", now=now, limit=5)
+    assert len(kept) == 5
+    assert "low" not in {post["external_id"] for post in kept}

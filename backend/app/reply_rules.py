@@ -234,6 +234,52 @@ def choose_post(
     return best
 
 
+def choose_posts(
+    posts: list[dict],
+    *,
+    facts: str = "",
+    query: str = "",
+    older_kept: int = 0,
+    recent_kept: int = 0,
+    account_handle: str = "",
+    now: datetime | None = None,
+    limit: int = 5,
+) -> list[dict]:
+    """Up to `limit` posts that clear the same line as choose_post, best first."""
+    if limit < 1:
+        return []
+    current = _as_utc(now) or datetime.now(timezone.utc)
+    ranked: list[tuple[float, dict]] = []
+    for post in posts:
+        text = str(post.get("text") or "")
+        if _SENSITIVE.search(text):
+            continue
+        if account_handle and str(post.get("handle") or "").lstrip("@").casefold() == account_handle.strip().lstrip("@").casefold():
+            continue
+        if replied_by(post.get("comments") or [], account_handle):
+            continue
+        if not over_view_threshold(post.get("views")):
+            continue
+        score = selection_score(post, facts=facts, query=query, now=current)
+        if score < _SCORE_FLOOR:
+            continue
+        ranked.append((score, post))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    ordered = [post for _, post in ranked]
+    first = choose_post(
+        posts,
+        facts=facts,
+        query=query,
+        older_kept=older_kept,
+        recent_kept=recent_kept,
+        account_handle=account_handle,
+        now=current,
+    )
+    if first is not None:
+        ordered = [first] + [post for post in ordered if post is not first]
+    return ordered[:limit]
+
+
 def selection_score(post: dict, *, facts: str = "", query: str = "", now: datetime | None = None) -> float:
     """Relevance, intention, activity, then recency. Views are not in the score."""
     text = str(post.get("text") or "")

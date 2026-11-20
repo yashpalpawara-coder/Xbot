@@ -33,7 +33,7 @@ from app.grok_find import (
 )
 from app.jobs import JobManager
 from app.prompts import analysis_prompt, comments_prompt, regenerate_prompt
-from app.reply_rules import choose_post, engagement_count, post_age_band, published_time, replied_by, reply_gate, reply_outcome, reply_problems, reply_prompt, reply_quality, rewrite_reply_prompt
+from app.reply_rules import choose_posts, engagement_count, post_age_band, published_time, replied_by, reply_gate, reply_outcome, reply_problems, reply_prompt, reply_quality, rewrite_reply_prompt
 from app.writer import compose_draft, earlier_texts, mark_posted, prepare_details, public_state, revise_details, store_details, store_draft
 from app.x_account import same_account
 from app.schemas import AnalysisBody, CommentBody, SearchIn, SettingsIn
@@ -536,25 +536,30 @@ class Service:
             except RuntimeError as exc:
                 self.jobs.log(job["id"], str(exc))
                 raw_posts = []
-            picked = choose_post(
+            picked = choose_posts(
                 raw_posts,
                 facts=detail,
                 query=query,
                 older_kept=older_kept,
                 recent_kept=recent_kept,
                 account_handle=str(product.get("x_handle") or ""),
+                limit=POSTS_PER_QUERY,
             )
-            kept = [picked] if picked else []
-            if picked is not None:
-                self._attach_country(session, job, picked, countries or {})
-                band = post_age_band(picked)
+            ready: list[dict[str, Any]] = []
+            for post in picked:
+                if _cancelled(job)():
+                    break
+                self.jobs.log(job["id"], f"Opening @{str(post.get('handle') or '').lstrip('@')} to read the country.")
+                self._attach_country(session, job, post, countries or {})
+                ready.append(post)
+                band = post_age_band(post)
                 if band == "recent":
                     recent_kept += 1
                 elif band == "older":
                     older_kept += 1
-            fresh = self._save_search_posts(kept, seen, product_id, search_id)
+            fresh = self._save_search_posts(ready, seen, product_id, search_id)
             added += fresh
-            self.jobs.log(job["id"], f"Added {fresh} post from this search.")
+            self.jobs.log(job["id"], f"Added {fresh} posts from this search. Tried for {POSTS_PER_QUERY}.")
             if index < total - 1 and self._wait_before_next_query(job):
                 break
         return added, queries, creators

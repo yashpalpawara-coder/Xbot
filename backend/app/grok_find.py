@@ -57,8 +57,8 @@ def more_message(count: int = 20) -> str:
 VIEW_MIN = 500
 CREATOR_COUNT = 10
 QUERY_COUNT = 30
-POSTS_PER_QUERY = 1
-SEARCH_SCAN = 8
+POSTS_PER_QUERY = 5
+SEARCH_SCAN = 15
 QUERY_PAUSE_SECONDS = 30
 
 _FENCED = re.compile(r"```[^\n]*\n(.*?)```", re.S)

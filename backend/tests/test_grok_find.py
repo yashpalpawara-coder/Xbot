@@ -153,18 +153,19 @@ def test_grok_limit_saves_queries_then_takes_two_posts_from_each(tmp_path, monke
     assert set(slept) == {1}
     assert result["queries"] == queries[:QUERY_COUNT]
     assert result["creators"] == [f"habitwriter{index}" for index in range(1, CREATOR_COUNT + 1)]
-    assert result["added"] == 1 + QUERY_COUNT + CREATOR_COUNT
+    assert result["added"] == 1 + 2 * (QUERY_COUNT + CREATOR_COUNT)
     stored = state.store.get_product(product["id"])
     assert stored is not None
     assert stored["search_queries"] == queries[:QUERY_COUNT]
     assert stored["creators"] == result["creators"]
     coming = state.store.list_coming(product["id"])
-    assert len(coming) == 1 + QUERY_COUNT + CREATOR_COUNT
+    assert len(coming) == 1 + 2 * (QUERY_COUNT + CREATOR_COUNT)
     assert "2113285567358103711" in {item["external_id"] for item in coming}
     per_query: dict[str, int] = {}
     for external_id in {item["external_id"] for item in coming if item["external_id"] != "2113285567358103711"}:
         per_query[external_id[:-1]] = per_query.get(external_id[:-1], 0) + 1
-    assert set(per_query.values()) == {POSTS_PER_QUERY}
+    assert set(per_query.values()) == {2}
+    assert 2 <= POSTS_PER_QUERY
     assert len(session.grok_prompts) == 2
     assert session.grok_prompts[1] == find_message(20)
 
@@ -191,7 +192,7 @@ def test_free_tier_banner_on_the_first_message_switches_to_chatgpt(tmp_path, mon
     assert "Do not search for posts yet." in session.grok_prompts[0]
     assert [item[0] for item in session.searches[:2]] == ["first query about focus", "second query about planning"]
     assert [item[0] for item in session.searches[2:]] == [f"from:habitwriter{index}" for index in range(1, CREATOR_COUNT + 1)]
-    assert result["added"] == 2 + CREATOR_COUNT
+    assert result["added"] == 2 * (2 + CREATOR_COUNT)
     assert result["queries"] == ["first query about focus", "second query about planning"]
     assert result["creators"] == [f"habitwriter{index}" for index in range(1, CREATOR_COUNT + 1)]
 
@@ -215,7 +216,7 @@ def test_a_grok_reply_that_never_arrives_still_asks_chatgpt(tmp_path, monkeypatc
     assert session.grok_prompts[1] == find_message(20)
     assert "Analyze this product." in session.chatgpt_prompts[0]
     assert result["queries"] == ["first query about focus", "second query about planning"]
-    assert result["added"] == 2 + CREATOR_COUNT
+    assert result["added"] == 2 * (2 + CREATOR_COUNT)
 
 
 def test_grok_without_a_limit_does_not_ask_chatgpt(tmp_path, monkeypatch) -> None:
@@ -267,7 +268,7 @@ def test_a_stopped_break_does_not_start_the_next_query(tmp_path, monkeypatch) ->
     result = state.service._grok_find(job, state.store.get_product(product["id"]) or {}, 20)
 
     assert [item[0] for item in session.searches] == ["first query about focus"]
-    assert result["added"] == POSTS_PER_QUERY
+    assert result["added"] == 2
     assert result["queries"] == ["first query about focus", "second query about planning"]
 
 

@@ -1206,9 +1206,6 @@ class BrowserSession:
         page.wait_for_timeout(1000)
         if cancelled is not None and cancelled():
             return ""
-        found = country_from_about(self._page_text(page))
-        if found:
-            return found
         location = ""
         loc = page.locator('[data-testid="UserLocation"]').first
         try:
@@ -1216,21 +1213,17 @@ class BrowserSession:
                 location = loc.inner_text() or ""
         except Exception:
             location = ""
-        joined = page.locator('[data-testid="UserJoinDate"]').first
-        try:
-            if joined.count() and joined.is_visible():
-                joined.click()
-                page.wait_for_timeout(800)
-                dialog = page.locator('[role="dialog"]')
-                text = dialog.first.inner_text() if dialog.count() else self._page_text(page)
-                if "something went wrong" in text.lower():
-                    logging.getLogger(__name__).info("About this account did not load for @%s", handle)
-                    return country_from_place(location)
-                found = country_from_about(text)
-                if found:
-                    return found
-        except Exception:
-            logging.getLogger(__name__).info("Account country dialog did not open for @%s", handle)
+        page.goto(f"https://x.com/{handle}/about", wait_until="domcontentloaded", timeout=45_000)
+        page.wait_for_timeout(800)
+        if cancelled is not None and cancelled():
+            return country_from_place(location)
+        text = self._page_text(page)
+        if "something went wrong" in text.lower():
+            logging.getLogger(__name__).info("About this account did not load for @%s", handle)
+            return country_from_place(location)
+        found = country_from_about(text)
+        if found:
+            return found
         return country_from_place(location)
 
     def _page_text(self, page: Page) -> str:
