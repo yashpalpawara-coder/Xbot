@@ -1223,6 +1223,9 @@ class BrowserSession:
                 page.wait_for_timeout(800)
                 dialog = page.locator('[role="dialog"]')
                 text = dialog.first.inner_text() if dialog.count() else self._page_text(page)
+                if "something went wrong" in text.lower():
+                    logging.getLogger(__name__).info("About this account did not load for @%s", handle)
+                    return country_from_place(location)
                 found = country_from_about(text)
                 if found:
                     return found
