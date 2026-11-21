@@ -429,6 +429,25 @@ class LocalStore:
             rows = [item for item in rows if str(item.get("product_id") or "") == str(product_id)]
         return list(reversed(rows))
 
+    def collapse_coming_countries(self) -> int:
+        """Keep Canada, Ireland, the UK, and the USA. Every other saved country becomes Unknown."""
+        from app.country import shown_country
+
+        with self._lock:
+            data = self._read()
+            changed = 0
+            for item in data["coming"]:
+                if not isinstance(item, dict):
+                    continue
+                current = str(item.get("country") or "").strip() or "Unknown"
+                wanted = shown_country(current)
+                if current != wanted:
+                    item["country"] = wanted
+                    changed += 1
+            if changed:
+                self._write(data)
+        return changed
+
     def update_coming(self, external_id: str, fields: dict[str, Any], product_id: str | None = None) -> dict[str, Any] | None:
         with self._lock:
             data = self._read()
@@ -894,6 +913,9 @@ class Store:
 
     def list_coming(self, product_id: str | None = None) -> list[dict[str, Any]]:
         return self.local.list_coming(product_id)
+
+    def collapse_coming_countries(self) -> int:
+        return self.local.collapse_coming_countries()
 
     def update_coming(self, external_id: str, fields: dict[str, Any], product_id: str | None = None) -> dict[str, Any] | None:
         return self.local.update_coming(external_id, fields, product_id)

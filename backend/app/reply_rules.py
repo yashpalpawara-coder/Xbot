@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from app.grok_find import VIEW_MIN, over_view_threshold
+from app.grok_find import VIEW_MIN
 from app.prompts import product_brief
 from app.validation import content_words, parse_count, shares_topic, weighted_length
 
@@ -15,7 +15,7 @@ _SHORT_REPLY = (
     "Write one short reply. Two short sentences at most. Do not write a paragraph.\n"
     "Use a natural tone and simple words, the way a person actually talks. Short words. Contractions are fine.\n"
     "Do not sound formal, clever, or like an ad. If a simpler word exists, use it.\n"
-    "Stay under Twitter's limit of 280 characters. A URL counts as 23 characters.\n"
+    "One length rule: stay under 180 weighted characters. A URL counts as 23. Twitter's hard limit is 280.\n"
     "Keep the whole reply under 180 characters, including the link. If it is longer, cut it before you answer.\n"
 )
 
@@ -123,7 +123,18 @@ _PITCH_WORDS = {
     "cloud", "disk", "files", "file", "free", "helps", "internal", "keeping", "macos",
     "moves", "moving", "offers", "space", "storage", "virtual", "worth",
 }
-_MAC_STORAGE = re.compile(r"\b(mac|macos|macbook|ssd|cache|caches|xcode|builds?)\b", re.I)
+_STORAGE_ISSUE = re.compile(
+    r"\b(storage|disk space|free space|system data|screen recordings?|ssd|internal disk|cloud drive)\b|\b\d+\s*gb\b",
+    re.I,
+)
+_OFF_TOPIC_TOOL = re.compile(
+    r"\b(edit(?:ing)? videos?|video edit\w*|premiere|final cut|compiler|syntax error|xcode)\b",
+    re.I,
+)
+_USEFUL_STEP = re.compile(
+    r"\b(check|look|before|keep|keeps|needs|need|fix|smaller|version|worth|move|folder|instead|rather|mark|done|visible|writes)\b",
+    re.I,
+)
 _FORBIDDEN_CLAIM = (
     re.compile(r"\b(clean|clears|delete|deletes|deleted)\b.{0,40}\b(caches?|builds?)\b", re.I),
     re.compile(r"\b(increase|increases|expand|expands)\b.{0,30}\b(ssd|capacity)\b", re.I),
@@ -134,6 +145,95 @@ _NEGATED = re.compile(
     r"\b(?:does not|doesn't|do not|don't|cannot|can't|must not|isn't|is not)\s+([a-z0-9][^.]{0,80})",
     re.I,
 )
+
+
+def _plain_words(text: str) -> set[str]:
+    """Words with apostrophes split, so d'Apple still counts as Apple."""
+    return content_words((text or "").replace("'", " ").replace("’", " "))
+
+
+def _hit_count(post_text: str, words: set[str]) -> int:
+    reply_words = _plain_words(post_text)
+    shared = 0
+    for word in words:
+        for other in reply_words:
+            if word == other or (len(word) >= 4 and len(other) >= 4 and (word.startswith(other) or other.startswith(word))):
+                shared += 1
+                break
+    return shared
+
+
+def _fact_sets(facts: str) -> tuple[set[str], set[str]]:
+    words = {word for word in _plain_words(facts) if word not in _COMMON and len(word) >= 4}
+    return {word for word in words if word not in _BROAD_WORDS}, words & _BROAD_WORDS
+
+
+def _topic_overlap(post_text: str, facts: str) -> int:
+    distinctive, broad = _fact_sets(facts)
+    return _hit_count(post_text, distinctive) + _hit_count(post_text, broad)
+
+
+def _storage_product(facts: str) -> bool:
+    saved = (facts or "").lower()
+    return any(token in saved for token in ("storage", "disk", "cloud"))
+
+
+def _on_topic(post_text: str, facts: str) -> bool:
+    """Two matching ideas, or a storage problem for a storage product. One loose word is not enough."""
+    distinctive, broad = _fact_sets(facts)
+    specific_hits = _hit_count(post_text, distinctive)
+    broad_hits = _hit_count(post_text, broad)
+    if specific_hits >= 2 or broad_hits >= 2:
+        return True
+    if specific_hits >= 1 and broad_hits >= 1:
+        return True
+    return _storage_product(facts) and bool(_STORAGE_ISSUE.search(post_text or ""))
+
+
+def _asked_for_tool(post_text: str) -> bool:
+    return bool(_DIRECT_ASK.search(post_text or "") or _ASKS_LINK.search(post_text or ""))
+
+
+def _off_topic_request(post_text: str, facts: str) -> bool:
+    """A request for a different kind of tool, such as a video editor or a compiler."""
+    if not _OFF_TOPIC_TOOL.search(post_text or ""):
+        return False
+    if _storage_product(facts) and _STORAGE_ISSUE.search(post_text or ""):
+        return False
+    return True
+
+
+def _product_mode(post_text: str, facts: str) -> bool:
+    """The author asked for a tool this product can actually do."""
+    if not _asked_for_tool(post_text) or _off_topic_request(post_text, facts):
+        return False
+    return _on_topic(post_text, facts)
+
+
+def _helpful_topic(post_text: str, facts: str) -> bool:
+    """The post describes a problem the product understands, without asking for a tool."""
+    return _on_topic(post_text, facts)
+
+
+def _reply_mode(post_text: str, facts: str) -> str:
+    """skip, discussion, helpful, or product. Later checks use this one decision."""
+    body = post_text or ""
+    if _SENSITIVE.search(body):
+        return "skip"
+    if not body.strip() or not (facts or "").strip():
+        return "discussion"
+    if _product_mode(body, facts):
+        return "product"
+    if _helpful_topic(body, facts):
+        return "helpful"
+    if _STRUGGLE.search(body) or _SITUATION.search(body):
+        return "discussion"
+    return "skip"
+
+
+def _post_reaches(post: dict) -> bool:
+    """The same reach line as reply_gate. A missing view count does not pass on its own."""
+    return _meets_reach(post.get("views"), post.get("replies"), post.get("likes"), post.get("reposts")) == ""
 
 
 def _count(value: object) -> int:
@@ -154,7 +254,7 @@ def skip_reason(post_text: str, facts: str = "") -> str:
     saved = facts.strip()
     if not saved or not body:
         return ""
-    if shares_topic(body, saved) or _STRUGGLE.search(body) or _SITUATION.search(body):
+    if _reply_mode(body, saved) != "skip":
         return ""
     return "Skip: this post is not about the product's topic."
 
@@ -255,7 +355,7 @@ def choose_post(
             continue
         if replied_by(post.get("comments") or [], account_handle):
             continue
-        if not over_view_threshold(post.get("views")):
+        if not _post_reaches(post):
             continue
         score = selection_score(post, facts=facts, query=query, now=current)
         if score < _SCORE_FLOOR:
@@ -296,7 +396,7 @@ def choose_posts(
             continue
         if replied_by(post.get("comments") or [], account_handle):
             continue
-        if not over_view_threshold(post.get("views")):
+        if not _post_reaches(post):
             continue
         score = selection_score(post, facts=facts, query=query, now=current)
         if score < _SCORE_FLOOR:
@@ -322,22 +422,27 @@ def selection_score(post: dict, *, facts: str = "", query: str = "", now: dateti
     """Relevance, intention, activity, then recency. Views are not in the score."""
     text = str(post.get("text") or "")
     current = _as_utc(now) or datetime.now(timezone.utc)
-    fact_hits = _overlap_count(text, facts)
+    fact_hits = _topic_overlap(text, facts)
     query_hits = _overlap_count(text, query) if query.strip() else 0
-    on_topic = fact_hits > 0 or query_hits > 0
+    mode = _reply_mode(text, facts) if facts.strip() else "discussion"
+    on_topic = mode in {"product", "helpful", "discussion"} or query_hits > 0
     score = 0.0
-    if fact_hits >= 2:
-        score += 28
+    if mode == "product":
+        score += 30
+    elif mode == "helpful":
+        score += 22
+    elif fact_hits >= 2:
+        score += 16
     elif fact_hits == 1:
-        score += 10
+        score += 4
     if query_hits:
         score += 14
     if on_topic and _HELP.search(text):
-        score += 15
-    elif on_topic and (_STRUGGLE.search(text) or re.search(r"\b(i|i've|i'm)\b.+\b(missed|stopped|failed|quit)\b", text, re.I)):
-        score += 12
-    elif on_topic and _SITUATION.search(text):
         score += 8
+    elif on_topic and (_STRUGGLE.search(text) or re.search(r"\b(i|i've|i'm)\b.+\b(missed|stopped|failed|quit)\b", text, re.I)):
+        score += 8
+    elif on_topic and _SITUATION.search(text):
+        score += 4
     band = post_age_band(post, current)
     score += {"recent": 14, "month": 8, "older": 4, "unknown": 6}[band]
     score += _activity_points(post, current)
@@ -432,6 +537,30 @@ def _activity_line(created_at: str, comments: list[dict], author_handle: str) ->
     return " ".join(parts) + " Age is not a reason to skip. A recent reply means the conversation is still active.\n"
 
 
+def _comment_kind(item: dict, comments: list[dict]) -> str:
+    """Separate the author's own note from a popular reply and from an ordinary comment."""
+    text = str(item.get("text") or "")
+    if item.get("is_author") or str(item.get("role") or "").casefold() in {"author", "op"}:
+        return "author clarification"
+    likes = _count(item.get("likes"))
+    top = max((_count(other.get("likes")) for other in comments), default=0)
+    if likes and likes == top and likes >= 5:
+        return "popular reply"
+    if "?" in text:
+        return "open question"
+    return "reply"
+
+
+def _mode_line(post_text: str, facts: str, who: str, link: str) -> str:
+    """One mode decision, written into the prompt so generation matches validation."""
+    mode = _reply_mode(post_text, facts)
+    if mode == "product":
+        return f"This post asked for a tool {who} can do. Explain that benefit and include {link} once. Do not pretend to be a customer.\n"
+    if mode == "helpful":
+        return f"Add one useful next step. Mention {who} and include {link} once only when that next step is a capability the saved facts grant.\n"
+    return f"Do not mention {who} and do not add {link}. A useful observation is enough.\n"
+
+
 def comment_notes(comments: list[dict]) -> str:
     """Loaded comments in conversation order. Likes, replies, and views stay separate."""
     lines = [
@@ -450,7 +579,7 @@ def comment_notes(comments: list[dict]) -> str:
         when = str(item.get("created_at") or "").strip()
         stamp = f", {when}" if when else ""
         lines.append(
-            f"- {_count(item.get('likes'))} likes, {_count(item.get('replies'))} replies, "
+            f"- {_comment_kind(item, comments)}: {_count(item.get('likes'))} likes, {_count(item.get('replies'))} replies, "
             f"{_count(item.get('views'))} views, {len(body)} characters{stamp}: {body}"
         )
     if shown == 0:
@@ -495,14 +624,16 @@ def reply_prompt(
         f"{context}"
         "Before you write, decide what the post is asking or what the author is describing. Do not include that analysis in the reply.\n"
         "There is no skip. This post was already selected, so write one reply.\n"
-        "Name one concrete detail from the post, such as a number, an app, an error, or the thing that broke. A sentence that could fit any post is a failed reply.\n"
+        "Name one concrete detail from the post, then add something useful: a next step, a warning, or an observation the author did not already make.\n"
+        "A number by itself, or a question that only asks for more detail, is a failed reply.\n"
+        f"{_mode_line(post_text, analysis, who, link)}"
         f"Write one reply that {who} can post under that same post.\n"
         "Write in the same language as the post.\n"
         "Write it the way a person types a reply on X. Natural, simple, a little uneven. It should still sound human if the account name is hidden.\n"
         f"{_SHORT_REPLY}"
         "Reply to the specific thing the author said. Write it like a person in the replies, not like an ad.\n"
         "Do not add a second line that pitches the product.\n"
-        f"Mention {who} only when the post is genuinely about the problem in the saved facts, or the author asked for a tool. Then include {link} once, in that same short reply.\n"
+        f"Mention {who} only when the post asked for a tool the saved facts can do. Then include {link} once, in that same short reply.\n"
         f"If the post is about something else, do not mention {who} and do not add a link.\n"
         "Do not claim the product cleans caches, increases SSD size, fixes a phone, restores deleted files, or fixes an OS bug, unless the saved facts say that.\n"
         "Do not write \"lines up with this\", \"offers\", or \"for a different case\".\n"
@@ -513,7 +644,6 @@ def reply_prompt(
         f"If you mention {who}, you are {who}. \"I\" means {who}. "
         f"Never write as a user of {who}. Do not say \"I use {who}\", \"I've been using {who}\", "
         f"\"I found {who}\", or \"I love {who}\". Do not say download. Do not add a hashtag.\n"
-        "Add a GIF only when a short reaction fits the post. Put it on its own last line as GIF: two or three ordinary words. Leave that line off when a GIF would not help.\n"
         "Put only the finished reply in one code block, so the copy box contains the reply and nothing else."
     )
 
@@ -525,17 +655,16 @@ def rewrite_reply_prompt(problem: str, *, name: str, url: str, post_text: str = 
         "Write that reply again in the same chat. Do not explain it. Do not skip.\n"
         f"{quoted}"
         f"Still needed: {problem.strip()}\n"
-        "Name one concrete detail from the post. Do not write \"lines up with this\".\n"
+        "Name one concrete detail from the post and add a useful next step. A question alone is not enough. Do not write \"lines up with this\".\n"
         f"You are {who}. \"I\" means {who}. Never write as a user of {who}.\n"
         "Write in the same language as the post.\n"
         "Write it the way a person types on X. Natural and simple. No em dash and no essay phrases.\n"
         f"{_SHORT_REPLY}"
         "Name the specific moment the author described. Do not answer with generic motivation. Do not invent features.\n"
         "Reply to the specific thing the author said. Write it like a person, not like an ad. Do not add a second line that pitches the product.\n"
-        f"Mention {who} only when the post is genuinely about the saved facts, or the author asked for a tool. Then include {url.strip()} once.\n"
+        f"Mention {who} only when the post asked for a tool the saved facts can do. Then include {url.strip()} once.\n"
         f"If the post is about something else, remove {who} and remove any link.\n"
         "Do not claim a feature the saved facts forbid.\n"
-        "Add a GIF only when it fits, on its own last line as GIF: two or three ordinary words.\n"
         "Do not say download. Do not add a hashtag.\n"
         "Put only the finished reply in one code block."
     )
@@ -549,7 +678,8 @@ def force_reply_prompt(post_text: str, *, name: str, url: str) -> str:
     return (
         "Do not skip. Do not explain why a reply is hard.\n"
         f"The post says: {quoted}\n"
-        "Write one reply a person would type under that post, in a natural tone and simple words. Name the specific thing the author described.\n"
+        "Write one reply a person would type under that post, in a natural tone and simple words. Name the specific thing the author described and add a useful next step.\n"
+        "If a useful next step is not possible, do not invent a product pitch.\n"
         "Do not write \"lines up with this\" or any sentence that could fit a different post.\n"
         f"Mention {who} and include {link} once only when the post is about that product's problem. Otherwise leave both out. Do not add a pitch line.\n"
         f"You are {who}. Never write as a user of {who}.\n"
@@ -560,7 +690,8 @@ def force_reply_prompt(post_text: str, *, name: str, url: str) -> str:
 
 def taken_reply(raw: str) -> str:
     matches = _FENCE.findall(raw or "")
-    text = matches[-1] if matches else (raw or "")
+    usable = [block for block in matches if not re.search(r"\b(main_topic|author_intention|decision)\b", block, re.I)]
+    text = (usable or matches)[-1] if matches else (raw or "")
     text = _LABEL.sub("", text.strip())
     lines: list[str] = []
     for raw_line in text.splitlines():
@@ -655,7 +786,9 @@ def ensure_product_link(text: str, url: str, post_text: str) -> str:
     body = (text or "").strip()
     if not link or not body or link.lower() in body.lower():
         return fit_reply_limit(body)
-    if not _direct_ask(post_text):
+    if not _product_mode(post_text, "") and not (_asked_for_tool(post_text) and not _off_topic_request(post_text, "")):
+        return fit_reply_limit(body)
+    if _off_topic_request(post_text, ""):
         return fit_reply_limit(body)
     lines = [line.strip() for line in body.splitlines() if line.strip()]
     if len(lines) >= 2:
@@ -691,37 +824,38 @@ def _with_link(prose: str, link: str) -> str:
 
 
 def _fit_link(text: str, link: str) -> str:
+    """Drop whole words until the link fits. Do not cut a word in half."""
     suffix = f" {link}"
-    head = text.rstrip()
-    while head and weighted_length(head + suffix) > REPLY_LIMIT:
-        head = head[:-1].rstrip()
-    if not head:
+    words = text.split()
+    while words and weighted_length(" ".join(words) + suffix) > REPLY_LIMIT:
+        words.pop()
+    if not words:
         return text
-    return head + suffix
+    return " ".join(words).rstrip(".,;:") + suffix
+
+
+def _optional_link_ok(reply: str, facts: str) -> bool:
+    """A helpful reply may carry the URL when it states a capability the facts grant."""
+    if not (facts or "").strip() or _unsupported(reply, facts):
+        return False
+    offered = re.compile(r"\b(cloud|disk|files|storage|habit|steps|health|workout)\b", re.I)
+    return bool(_facts_grant(facts, offered) and offered.search(reply or ""))
 
 
 def _product_relevant(post_text: str, facts: str) -> bool:
-    """The post is about this product's problem. A habit keyword or a question mark is not enough."""
-    if shares_topic(post_text, facts):
-        return True
-    saved = (facts or "").lower()
-    if not any(token in saved for token in ("mac", "storage", "disk")):
-        return False
-    return bool(_MAC_STORAGE.search(post_text or ""))
+    """True only when the author asked for a tool this product can do. One keyword is not enough."""
+    return _product_mode(post_text, facts)
 
 
 def _solution_shape(text: str, *, name: str, url: str, direct: bool, relevant: bool) -> list[str]:
-    """A direct ask needs the URL once. A relevant mention does too. No pitch line is required."""
+    """A product reply needs the URL once. A discussion or a helpful reply must not be forced to carry it."""
+    del name
+    if not relevant:
+        return []
     link = url.strip()
-    product = name.strip()
-    lowered = text.lower()
-    problems: list[str] = []
-    if direct and link and link.lower() not in lowered:
-        problems.append("Reply should include the product URL for a direct ask.")
-    mentioned = bool(product and product.lower() in lowered)
-    if mentioned and relevant and link and link.lower() not in lowered:
-        problems.append("Reply should include the product URL once when it mentions the product.")
-    return problems
+    if direct and link and link.lower() not in text.lower():
+        return ["Reply should include the product URL for a direct ask."]
+    return []
 
 
 def _hard_problems(
@@ -747,14 +881,17 @@ def _hard_problems(
         problems.append("Reply repeats generic advice.")
     if "—" in body or any(phrase in lowered for phrase in _STIFF) or _NOT_JUST.search(lowered):
         problems.append("Reply sounds written, not spoken.")
-    direct = _direct_ask(post_text)
-    relevant = direct or _product_relevant(post_text, facts)
+    product = name.strip()
+    product_mode = _product_mode(post_text, facts) if post_text.strip() else False
+    helpful = _reply_mode(post_text, facts) == "helpful" if post_text.strip() else False
     if any(phrase in lowered for phrase in _PITCH):
         problems.append("Reply is a download pitch.")
-    if _URL.search(body) and not relevant:
+    if _URL.search(body) and not product_mode and not (helpful and _optional_link_ok(body, facts)):
         problems.append("Reply includes a link the author did not ask for.")
-    problems.extend(_solution_shape(text, name=name, url=url, direct=direct, relevant=relevant))
-    product = name.strip()
+    problems.extend(_solution_shape(text, name=name, url=url, direct=product_mode, relevant=product_mode))
+    spoken_name = _URL.sub(" ", body)
+    if product and re.search(rf"\b{re.escape(product)}\b", spoken_name, re.I) and post_text.strip() and not product_mode and not helpful:
+        problems.append("Reply mentions the product on a post that did not ask for it.")
     if product and re.search(
         rf"\bi (?:use|used|found|love|am using|have been using|'ve been using|’ve been using) {re.escape(product)}\b",
         body,
@@ -784,52 +921,68 @@ def _generic_advice(lowered: str) -> bool:
 
 
 def _score_parts(text: str, post_text: str, recent: list[str] | None, name: str = "") -> dict[str, int]:
-    """Specific 30, useful 25, natural up to 18, original 15, accurate up to 8."""
+    """Situation 25, usefulness 30, naturalness 20, distinctness 10, accuracy 15."""
     body = " ".join((text or "").split())
     distinctive = {word for word in content_words(post_text) if word not in _COMMON}
     shared = _shared_count(body, distinctive)
     specific = _specific_reply(body, post_text)
+    useful = bool(_USEFUL_STEP.search(body)) and not _question_only(body)
     spoken = bool(re.search(r"\b\w+'\w+", body))
     if not post_text.strip():
-        relevance = 24
+        relevance = 20
     elif specific and shared >= 2:
-        relevance = 30
+        relevance = 25
     elif specific and shared == 1:
-        relevance = 18
-    elif shared >= 2:
         relevance = 16
+    elif shared >= 2:
+        relevance = 10
     elif shared == 1:
-        relevance = 8
+        relevance = 4
     else:
         relevance = 0
-    lowered = body.lower()
-    if _generic_advice(lowered):
+    if _generic_advice(body.lower()) or _question_only(body):
         contribution = 0
+    elif useful and specific:
+        contribution = 30
+    elif useful:
+        contribution = 16
     elif specific:
-        contribution = 25
+        contribution = 8
     else:
-        contribution = 6
+        contribution = 0
     if spoken and specific:
-        naturalness = 18
+        naturalness = 20
     elif specific:
-        naturalness = 12
+        naturalness = 14
     elif spoken:
         naturalness = 8
     else:
         naturalness = 4
+    fresh = _originality(body, recent, name)
+    distinct = 10 if fresh >= 15 else 4 if fresh >= 5 else 0
     return {
         "relevance": relevance,
         "contribution": contribution,
         "naturalness": naturalness,
-        "originality": _originality(body, recent, name),
-        "accuracy": 8 if specific else 3,
+        "originality": distinct,
+        "accuracy": 15 if specific and useful else 5 if specific else 0,
     }
 
 
+def _question_only(body: str) -> bool:
+    """A question that does not also give a next step."""
+    text = (body or "").strip()
+    if "?" not in text:
+        return False
+    return _USEFUL_STEP.search(text) is None
+
+
 def _specific_reply(reply: str, post_text: str) -> bool:
-    """True when the reply names the post and adds a word of its own. A number or a contraction is not enough."""
+    """True when the reply names the post and adds a useful word of its own. A number or a contraction is not enough."""
     if not post_text.strip():
         return True
+    if _question_only(reply):
+        return False
     distinctive = {word for word in content_words(post_text) if word not in _COMMON}
     if _shared_count(reply, distinctive) < 1 and not shares_topic(reply, post_text):
         return False
@@ -838,7 +991,7 @@ def _specific_reply(reply: str, post_text: str) -> bool:
         for word in content_words(reply) - content_words(post_text)
         if len(word) >= 6 and word not in _FILLER and word not in _COMMON
     }
-    return bool(added)
+    return bool(added) and bool(_USEFUL_STEP.search(reply or ""))
 
 
 def _shared_count(body: str, words: set[str]) -> int:

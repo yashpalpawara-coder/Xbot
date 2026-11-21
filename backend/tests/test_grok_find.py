@@ -219,6 +219,29 @@ def test_a_grok_reply_that_never_arrives_still_asks_chatgpt(tmp_path, monkeypatc
     assert result["added"] == 2 * (2 + CREATOR_COUNT)
 
 
+def test_a_limit_keeps_the_posts_grok_already_wrote_and_reads_their_country(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    detail = "Ted is a Mac app. It asks for three tasks and is for people who work on a Mac."
+    product = _verify(client, tmp_path, "Ted", "https://tedcoachai.com", detail)
+    state = get_state()
+    session = _FinderSession(
+        grok_replies=["Ted is a quiet Mac app.", "RAISE"],
+        chatgpt_reply="1. first query about focus\n2. second query about planning",
+    )
+    session.visible = "https://x.com/ada/status/2113285567358103999\n(2,400 views)"
+    monkeypatch.setattr("app.services.BrowserSession", lambda settings: session)
+    monkeypatch.setattr("app.services.time.sleep", lambda seconds: None)
+    monkeypatch.setattr(state.jobs, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(state.jobs, "update", lambda *args, **kwargs: None)
+
+    result = state.service._grok_find({"id": "job", "cancel": threading.Event()}, state.store.get_product(product["id"]) or {}, 20)
+
+    coming = state.store.list_coming(product["id"])
+    kept = [item for item in coming if item["external_id"] == "2113285567358103999"]
+    assert kept and kept[0]["country"] == "Unknown"
+    assert result["added"] == 1 + 2 * (2 + CREATOR_COUNT)
+
+
 def test_grok_without_a_limit_does_not_ask_chatgpt(tmp_path, monkeypatch) -> None:
     client = _client(tmp_path, monkeypatch)
     detail = "Ted is a Mac app. It asks for three tasks and is for people who work on a Mac."
@@ -282,6 +305,7 @@ class _FinderSession:
         self.searches: list[tuple[str, int]] = []
         self.grok_url = "https://x.com/i/grok?conversation=9a6d2af3-78ee-41a5-93fd-ec5fb7c5f45e"
         self.chatgpt_url = ""
+        self.visible = ""
 
     def __enter__(self):
         return self
@@ -300,6 +324,9 @@ class _FinderSession:
         if reply == "RAISE":
             raise RuntimeError("Grok did not finish a reply.")
         return reply
+
+    def grok_visible_reply(self, prompt=""):
+        return self.visible
 
     def ask_chatgpt(self, prompt, cancelled, chat_url="", settle=8):
         self.chatgpt_prompts.append(prompt)

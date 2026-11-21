@@ -35,7 +35,7 @@ _COUNTRIES: dict[str, tuple[str, ...]] = {
     "Indonesia": (),
     "Iran": (),
     "Iraq": (),
-    "Ireland": (),
+    "Ireland": ("Republic of Ireland", "Éire", "Eire"),
     "Israel": (),
     "Italy": (),
     "Japan": (),
@@ -86,26 +86,38 @@ for _name, _aliases in _COUNTRIES.items():
         _LOOKUP[_key(_alias)] = _name
 
 
+_KEPT = {"Canada", "Ireland", "United Kingdom", "United States"}
+
+
 def canonical_country(raw: str) -> str:
     return _LOOKUP.get(_key(raw), "")
 
 
+def shown_country(raw: str) -> str:
+    """Canada, Ireland, the UK, and the USA stay named. Every other country is Unknown."""
+    found = canonical_country(raw)
+    if found in _KEPT:
+        return found
+    return "Unknown"
+
+
 def country_from_about(text: str) -> str:
-    """The country X prints under About this account."""
+    """The country X prints under About this account. Only the four kept countries are returned."""
     match = _ABOUT.search(text or "")
     if not match:
         return ""
-    return canonical_country(match.group(1))
+    found = canonical_country(match.group(1))
+    return found if found in _KEPT else ""
 
 
 def country_from_place(text: str) -> str:
-    """A place label counts only when it names a country, such as 'London, United Kingdom'."""
+    """A place label counts only when it names Canada, Ireland, the UK, or the USA."""
     cleaned = " ".join((text or "").replace("·", " ").split())
     if not cleaned:
         return ""
     parts = [part.strip(" .") for part in cleaned.split(",")]
     for part in reversed(parts):
         found = canonical_country(part)
-        if found:
+        if found in _KEPT:
             return found
     return ""

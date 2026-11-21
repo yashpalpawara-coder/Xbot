@@ -1662,6 +1662,15 @@ class BrowserSession:
         self._remember_grok(page)
         return answer
 
+    def grok_visible_reply(self, prompt: str = "") -> str:
+        """The Grok text after this prompt. Used when the limit arrives before the reply is marked finished."""
+        page = self._page("x.com")
+        current = self._grok_surface_text(page)
+        needle = " ".join((prompt or "").strip().split())[:40]
+        if needle and needle in current:
+            return current.rsplit(needle, 1)[-1].strip()
+        return ""
+
     def _remember_grok(self, page: Page) -> None:
         """Keep the conversation id. X puts it in the query, and dropping it starts a new chat."""
         deadline = time.time() + 12

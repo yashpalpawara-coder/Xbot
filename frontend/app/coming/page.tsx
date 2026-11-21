@@ -18,9 +18,18 @@ export default function ComingPage() {
   const [jobId, setJobId] = useState<string | null>(null);
   const job = useJob(jobId);
   const running = job?.status === "running";
+  const open = useMemo(
+    () => posts.filter((post) => !["published", "uncertain"].includes(post.status || "")),
+    [posts],
+  );
   const countryCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const post of posts) {
+    const counts = new Map<string, number>([
+      ["United States", 0],
+      ["Canada", 0],
+      ["United Kingdom", 0],
+      ["Ireland", 0],
+    ]);
+    for (const post of open) {
       const name = post.country?.trim() || "Unknown";
       counts.set(name, (counts.get(name) || 0) + 1);
     }
@@ -29,9 +38,9 @@ export default function ComingPage() {
       if (right[0] === "Unknown") return -1;
       return right[1] - left[1] || left[0].localeCompare(right[0]);
     });
-  }, [posts]);
+  }, [open]);
   const selectedCountry = countryCounts.some(([name]) => name === country) ? country : "All";
-  const shown = selectedCountry === "All" ? posts : posts.filter((post) => (post.country?.trim() || "Unknown") === selectedCountry);
+  const shown = selectedCountry === "All" ? open : open.filter((post) => (post.country?.trim() || "Unknown") === selectedCountry);
   const waiting = shown.filter((post) => ["saved", "skipped"].includes(post.status || "saved")).length;
   const ready = shown.filter((post) => (post.status === "drafted" || post.status === "posting") && (post.reply || "").trim()).length;
   const canPost = waiting > 0 || ready > 0;
@@ -124,7 +133,7 @@ export default function ComingPage() {
       <section className="panel space-y-4 p-5">
         <p className="text-sm text-[var(--muted)]">
           {productName ? `${productName} has its own list. ` : ""}
-          {posts.length} saved. {waiting} still need a reply{selectedCountry === "All" ? "" : ` in ${selectedCountry}`}. Post replies writes one comment on every post, includes the product URL, likes the post, waits 30 seconds, then opens the next post. It does not save a draft.
+          {shown.length} posts{selectedCountry === "All" ? "" : ` in ${selectedCountry}`}. {waiting} still need a reply. Post replies comments only on the posts shown here, includes the product URL, likes the post, waits 30 seconds, then opens the next post. It does not save a draft.
         </p>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm text-[var(--muted)]">
@@ -136,7 +145,7 @@ export default function ComingPage() {
         </div>
         <div className="flex flex-wrap gap-2">
           <button className="btn" type="button" onClick={() => void start()} disabled={!canPost || running}>
-            {running && job?.type === "coming_comments" ? "Posting replies…" : "Post replies"}
+            {running && job?.type === "coming_comments" ? "Posting replies…" : selectedCountry === "All" ? "Post replies" : `Post replies in ${selectedCountry}`}
           </button>
           <button className="btn-danger" type="button" onClick={() => void stop()} disabled={!running}>
             Stop
@@ -145,8 +154,8 @@ export default function ComingPage() {
         {error ? <p className="text-[var(--bad)]">{error}</p> : null}
         {job ? <JobLog message={job.message} progress={job.progress} logs={job.logs} error={job.error} /> : null}
       </section>
-      {posts.length === 0 ? <p className="text-[var(--muted)]">{productName ? `None yet for ${productName}. Find posts first.` : "None yet. Find posts first."}</p> : null}
-      {posts.length > 0 ? (
+      {open.length === 0 ? <p className="text-[var(--muted)]">{productName ? `None yet for ${productName}. Find posts first.` : "None yet. Find posts first."}</p> : null}
+      {open.length > 0 ? (
         <section className="panel space-y-3 p-5">
           <label className="block max-w-xs">
             <span className="label">Country</span>

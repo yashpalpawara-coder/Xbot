@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from app.activity import collect_activity, load_activity, save_activity, store_reply_draft
 from app.browser_session import BrowserSession, SessionState
 from app.errors import AppError
-from app.country import country_from_place
+from app.country import country_from_place, shown_country
 from app.grok_find import (
     CREATOR_COUNT,
     LIMIT_NOTICE,
@@ -68,7 +68,7 @@ def country_label(country: str) -> str:
 
 
 def row_country(row: dict[str, Any]) -> str:
-    return str(row.get("country") or "").strip() or "Unknown"
+    return shown_country(str(row.get("country") or ""))
 
 
 def rows_in_country(rows: list[dict[str, Any]], country: str) -> list[dict[str, Any]]:
@@ -182,6 +182,7 @@ class Service:
     def _coming_rows(self, product: dict[str, Any] | None) -> list[dict[str, Any]]:
         if not isinstance(product, dict) or not product.get("id"):
             return []
+        self.store.collapse_coming_countries()
         return self.store.list_coming(str(product["id"]))
 
     def _product_post_ids(self, product_id: str) -> list[str]:
@@ -430,6 +431,8 @@ class Service:
         product = self._selected_raw()
         posts = []
         for row in self._coming_rows(product):
+            if str(row.get("status") or "") in {"published", "uncertain"}:
+                continue
             item = dict(row)
             item["country"] = str(item.get("country") or "").strip() or "Unknown"
             posts.append(item)
@@ -606,7 +609,16 @@ class Service:
         except RuntimeError as exc:
             text = str(exc)
             if limit_reached(text) or "did not finish a reply" in text.lower():
+                visible = ""
+                reader = getattr(session, "grok_visible_reply", None)
+                if reader is not None:
+                    try:
+                        visible = reader(prompt) or ""
+                    except Exception:
+                        visible = ""
                 self.jobs.log(job["id"], "Grok limit reached.")
+                if posts_from_reply(visible):
+                    return f"{visible}\n{LIMIT_NOTICE}".strip(), True
                 return LIMIT_NOTICE, True
             raise
         return reply, limit_reached(reply)
@@ -688,7 +700,7 @@ class Service:
                     "status": "saved",
                     "reply": "",
                     "comment_id": None,
-                    "country": str(raw.get("country") or "Unknown"),
+                    "country": shown_country(str(raw.get("country") or "")),
                     "product_id": product_id,
                     "added_at": now,
                 }
@@ -714,7 +726,7 @@ class Service:
         country = "Unknown"
         reader = getattr(session, "account_country", None)
         if handle and reader is not None and not _cancelled(job)():
-            if self._pause(job, QUERY_PAUSE_SECONDS, "Waiting 30 seconds before the account check."):
+            if self._pause(job, 7, "Waiting 7 seconds before the account check."):
                 post["country"] = "Unknown"
                 return
             self.jobs.log(job["id"], f"Reading the country for @{handle}.")
@@ -737,7 +749,10 @@ class Service:
     ) -> int:
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         rows: list[dict[str, Any]] = []
-        for item in posts_from_reply(reply):
+        items = posts_from_reply(reply)
+        if job is not None and items:
+            self.jobs.log(job["id"], f"Reading the country for {len(items)} posts from this Grok batch.")
+        for item in items:
             if session is not None and job is not None:
                 self._attach_country(session, job, item, countries or {})
             key = str(item.get("external_id") or "")
@@ -797,7 +812,10 @@ class Service:
             if label == "all countries":
                 raise AppError("The coming list is empty.", 409, "empty")
             raise AppError(f"No saved post is waiting for {label}.", 409, "empty")
-        return self.jobs.start("coming_comments", lambda job: self._coming_comments(job, pending, product, ready))
+        return self.jobs.start(
+            "coming_comments",
+            lambda job: self._coming_comments(job, pending, product, ready, country),
+        )
 
     def start_post_drafts(self, country: str = "") -> dict[str, Any]:
         """Post drafted replies for the selected country. This click is the approval."""
@@ -836,8 +854,15 @@ class Service:
         pending: list[dict[str, Any]],
         product: dict[str, Any],
         ready: list[dict[str, Any]] | None = None,
+        country: str = "",
     ) -> dict[str, Any]:
         """Ask ChatGPT for one reply, post it, then wait 30 seconds. A skip is not posted. A reply already written is posted in the same run."""
+        pending = rows_in_country(pending, country)
+        ready = rows_in_country(list(ready or []), country)
+        label = country_label(country)
+        scope = len(pending) + len(ready)
+        where = "" if label == "all countries" else f" in {label}"
+        self.jobs.log(job["id"], f"Commenting on {scope} {'post' if scope == 1 else 'posts'}{where}.")
         name = str(product.get("name") or "")
         url = str(product.get("url") or "")
         detail = str(product.get("detail") or "")
