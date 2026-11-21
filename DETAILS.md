@@ -149,7 +149,7 @@ Job types:
 
 Settings stores the username and password on the selected product. The password is written to the local store and is removed from API responses and from export. `x_password_set` tells the dashboard that a password exists.
 
-Each product keeps its own `x_username`, `x_password`, and `x_handle`. Choosing another product in the shell signs out of the previous X account and signs into that product's account before any later read or post.
+Each product keeps its own `x_username`, `x_password`, and `x_handle`. Choosing another product opens that product's X page and leaves it for 5 minutes. The saved username and password are submitted only if that account is still signed out when the 5 minutes end.
 
 ### 2. Analyse the product
 
@@ -172,7 +172,7 @@ Finder has two ways in.
 
 **Grok find.** `POST /api/finder/grok` with `count` from 1 to 100.
 
-1. Sign into the selected product's X account. If X is signed out, the login page stays open for 5 minutes so the sign-in can be finished by hand. After 5 minutes, the saved username and password are submitted. Stop cancels the wait.
+1. Open the selected product's X page and leave it. Sign in by hand in that window. The page stays open for 5 minutes. After 5 minutes, if that account is still signed out, the saved username and password are submitted. Stop cancels the wait.
 2. Open Grok in that Chrome profile and send `product_message`. This pastes the verified name, URL, and detail, and tells Grok not to search yet.
 3. Send `find_message`. Grok should return posts from the audience's content universe: problems, habits, and topics from the analysis. It should skip ads, giveaways, bare links, and unrelated trends. A smaller creator with the right audience is preferred over a huge unrelated account. Each kept post needs a real status URL and more than 500 views or impressions when a count is shown.
 4. Up to seven follow-ups ask for `count` more posts. The loop stops when the job is cancelled, a batch adds nothing new, or Grok's limit is reached.
@@ -195,7 +195,7 @@ If that banner is up, or Grok never finishes the post reply, Find stops asking G
 
 ### 5. Draft coming replies
 
-Coming lists the selected product's saved posts. A country dropdown and table filter that list. The page also shows the last X login and an X login button. That button opens the X page for 5 minutes, then uses the saved login if the account is still signed out. `POST /api/coming/comment` walks rows whose status is `saved`. A list that already has drafts and nothing new returns a review message. Nothing in this job is published.
+Coming lists the selected product's saved posts. A country dropdown and table filter that list. Draft replies and Post replies use the country selected there. All countries uses the whole list. The page also shows the last X login and an X login button. That button only opens the X page. Sign in by hand in that window. After 5 minutes, the saved username and password are submitted if the account is still signed out. `POST /api/coming/comment` walks rows whose status is `saved`. A list that already has drafts and nothing new returns a review message. A reply that passes is posted immediately and is not saved as a draft.
 
 For each post:
 
@@ -203,9 +203,9 @@ Draft replies waits 30 seconds before each post after the first. Stop cancels th
 
 1. Open the status and load the comments under it. Each comment keeps its text, length, likes, replies, and views. A post with no comments can still be drafted.
 2. Skip a post unless it shows more than 500 views, or likes, replies, and reposts together are more than 500. A missing view count does not pass on its own. Then skip a personal health disclosure, a conversation this account already replied to, and a post that shares no topic with the saved analysis. A question mark by itself is not enough to keep it. A specific situation, such as a missed workout or a routine, can still be drafted. Age does not remove it. A post that cannot be opened is skipped.
-3. Ask ChatGPT, in the product chat, for one reply or a `SKIP` line. The reply is in the post's language, refers to something the author wrote, and names the product only when a saved fact answers that point. A link is included only when the author asked for an app, a product, or a link. The full saved analysis is passed, including limitations.
-4. `reply_problems` rejects an empty reply, a hashtag, generic praise, generic motivation, an unasked link, a download pitch, a reply written as a user of the product, a reply that does not address the post, a question that misses the point, a claim the saved features do not support, a reply that repeats a recent reply, a reply under about 20 letters, a reply over 280 weighted characters, or a reply whose quality score is under 70. The score is specific relevance up to 30, a useful addition up to 25, naturalness up to 18, originality 15, and accuracy up to 8. Sharing a keyword, including a number, or using a contraction is not enough to pass. A skip or a failed check sets that score to 0. One rewrite is attempted. A reply that still fails, or a `SKIP`, is marked `skipped`.
-5. A reply that passes is stored as a draft with status `drafted`. It appears on Coming and on the Drafts screen. Drafting does not post it and does not like the post.
+3. Ask ChatGPT, in the product chat, for one reply or a `SKIP` line. The reply starts from what the post is asking or describing. Comments already under the post stay loaded. When comments are there, they are reference only. When none are there, the reply comes from the post itself. A direct ask for an app or a solution gets one short reply in the post's language, with the product URL. An indirect problem gets two lines: the first answers the post, and the second mentions the product as the solution with the URL, only when a saved fact does that. A GIF line is kept only when the draft asks for one, and it is attached when the reply is posted. The full saved analysis is passed, including limitations.
+4. `reply_problems` rejects an empty reply, a hashtag, generic praise, generic motivation, a link on a post that is not asking for a solution, a missing product URL on a direct ask, an indirect reply that puts the product on the first line, a download pitch, a reply written as a user of the product, a reply that does not address the post, a question that misses the point, a claim the saved features do not support, a reply that repeats a recent reply, a reply under about 20 letters, a reply over 280 weighted characters, or a reply whose quality score is under 70. The score is specific relevance up to 30, a useful addition up to 25, naturalness up to 18, originality 15, and accuracy up to 8. Sharing a keyword, including a number, or using a contraction is not enough to pass. A skip or a failed check sets that score to 0. One rewrite is attempted. A reply that still fails, or a `SKIP`, is marked `skipped`.
+5. A reply that passes is posted on that X post from the signed-in account. It is stored as `published`, or `uncertain` when the reply cannot be confirmed. It does not appear on Drafts. The job does not like the post. Then it waits 30 seconds before the next post. Stop cancels the wait.
 
 `POST /api/coming/post` is the Post replies button on Coming and on Drafts. It sends every drafted reply for the selected product from the signed-in account. That click is the approval, so the drafts do not need a separate approve step. It waits 2 minutes after each reply before the next one. Stop cancels the wait. A reply that fails to send stays `drafted`. A reply that cannot be confirmed is `uncertain` and is not sent again. The job does not like the post. The studio page can still approve and publish one reply on its own.
 

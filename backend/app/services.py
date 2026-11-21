@@ -33,7 +33,7 @@ from app.grok_find import (
 )
 from app.jobs import JobManager
 from app.prompts import analysis_prompt, comments_prompt, regenerate_prompt
-from app.reply_rules import choose_posts, engagement_count, post_age_band, published_time, replied_by, reply_gate, reply_outcome, reply_problems, reply_prompt, reply_quality, rewrite_reply_prompt
+from app.reply_rules import choose_posts, engagement_count, ensure_product_link, force_reply_prompt, gif_search, post_age_band, published_time, replied_by, reply_outcome, reply_problems, reply_prompt, reply_quality, rewrite_reply_prompt
 from app.writer import compose_draft, earlier_texts, mark_posted, prepare_details, public_state, revise_details, store_details, store_draft
 from app.x_account import same_account
 from app.schemas import AnalysisBody, CommentBody, SearchIn, SettingsIn
@@ -60,6 +60,25 @@ def _public_settings(raw: dict[str, Any]) -> dict[str, Any]:
     return public
 
 
+def country_label(country: str) -> str:
+    name = " ".join(str(country or "").split())
+    if not name or name.casefold() == "all":
+        return "all countries"
+    return name
+
+
+def row_country(row: dict[str, Any]) -> str:
+    return str(row.get("country") or "").strip() or "Unknown"
+
+
+def rows_in_country(rows: list[dict[str, Any]], country: str) -> list[dict[str, Any]]:
+    """Posts for the country selected on Coming. An empty country means the whole list."""
+    if country_label(country) == "all countries":
+        return list(rows)
+    wanted = country_label(country).casefold()
+    return [row for row in rows if row_country(row).casefold() == wanted]
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -82,6 +101,15 @@ def _product_fields(name: str, url: str) -> tuple[str, str]:
     if not product_url.startswith(("http://", "https://")):
         raise AppError("Enter a URL that starts with https://.", 400, "bad_url")
     return product_name, product_url
+
+
+def _specific_reply(raw: str) -> tuple[str, str]:
+    """A reply that names this post. A skip or the canned fallback is not one."""
+    skipped, reply = reply_outcome(raw)
+    text = reply.strip()
+    if skipped or not text or "lines up with this" in text.casefold():
+        return "", ""
+    return text, gif_search(raw)
 
 
 class Service:
@@ -751,31 +779,41 @@ class Service:
             )
         return len(self.store.add_coming(rows))
 
-    def start_coming_comments(self) -> dict[str, Any]:
+    def start_coming_comments(self, country: str = "") -> dict[str, Any]:
         product = self._selected_raw()
         if not isinstance(product, dict) or not str(product.get("detail") or "").strip():
             raise AppError("Verify the product on Finder first.", 409, "not_verified")
-        rows = self._coming_rows(product)
-        pending = [row for row in rows if str(row.get("status") or "saved") == "saved"]
-        if not pending:
-            drafted = [row for row in rows if str(row.get("status") or "") == "drafted"]
-            if drafted:
-                raise AppError("Drafts are waiting. Use Post replies to send them.", 409, "needs_review")
-            raise AppError("The coming list is empty.", 409, "empty")
-        return self.jobs.start("coming_comments", lambda job: self._coming_comments(job, pending, product))
+        rows = rows_in_country(self._coming_rows(product), country)
+        pending = [row for row in rows if str(row.get("status") or "saved") in {"saved", "skipped"}]
+        ready = [
+            row
+            for row in rows
+            if str(row.get("status") or "") in {"drafted", "posting"}
+            and str(row.get("reply") or "").strip()
+            and str(row.get("url") or "").startswith("http")
+        ]
+        label = country_label(country)
+        if not pending and not ready:
+            if label == "all countries":
+                raise AppError("The coming list is empty.", 409, "empty")
+            raise AppError(f"No saved post is waiting for {label}.", 409, "empty")
+        return self.jobs.start("coming_comments", lambda job: self._coming_comments(job, pending, product, ready))
 
-    def start_post_drafts(self) -> dict[str, Any]:
-        """Post every drafted reply for the selected product. This click is the approval."""
+    def start_post_drafts(self, country: str = "") -> dict[str, Any]:
+        """Post drafted replies for the selected country. This click is the approval."""
         product = self._selected_raw()
         if not isinstance(product, dict) or not str(product.get("detail") or "").strip():
             raise AppError("Verify the product on Finder first.", 409, "not_verified")
         rows = [
             row
-            for row in self._coming_rows(product)
+            for row in rows_in_country(self._coming_rows(product), country)
             if str(row.get("status") or "") in {"drafted", "posting"} and str(row.get("reply") or "").strip() and str(row.get("url") or "").startswith("http")
         ]
         if not rows:
-            raise AppError("No drafted reply is waiting.", 409, "empty")
+            label = country_label(country)
+            if label == "all countries":
+                raise AppError("No drafted reply is waiting.", 409, "empty")
+            raise AppError(f"No drafted reply is waiting for {label}.", 409, "empty")
         return self.jobs.start("coming_post", lambda job: self._post_drafts(job, rows, product))
 
     def start_post_coming(self, comment_id: str, idempotency_key: str) -> dict[str, Any]:
@@ -792,8 +830,14 @@ class Service:
         product = self.store.get_product(str(row.get("product_id") or "")) or self._selected_raw() or {}
         return self.jobs.start("coming_post", lambda job: self._post_drafts(job, [row], product))
 
-    def _coming_comments(self, job: dict[str, Any], pending: list[dict[str, Any]], product: dict[str, Any]) -> dict[str, Any]:
-        """Draft a reply from the saved analysis. This does not publish it."""
+    def _coming_comments(
+        self,
+        job: dict[str, Any],
+        pending: list[dict[str, Any]],
+        product: dict[str, Any],
+        ready: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Ask ChatGPT for one reply, post it, then wait 30 seconds. A skip is not posted. A reply already written is posted in the same run."""
         name = str(product.get("name") or "")
         url = str(product.get("url") or "")
         detail = str(product.get("detail") or "")
@@ -819,11 +863,13 @@ class Service:
 
         with BrowserSession(self.settings) as session:
             self._require_account(session, job, product)
+            sent = self._post_drafts(job, list(ready or []), product, session=session, pause_seconds=30, report=False)
+            drafted += int(sent.get("posted") or 0)
             total = len(pending)
             for index, row in enumerate(pending):
                 if _cancelled(job)():
                     break
-                if index > 0 and self._pause(job, QUERY_PAUSE_SECONDS, "Waiting 30 seconds before the next post."):
+                if (index > 0 or drafted) and self._pause(job, 30, "Waiting 30 seconds before the next post."):
                     break
                 status_key = str(row.get("external_id") or row.get("url") or "")
                 if status_key and status_key in done:
@@ -831,7 +877,7 @@ class Service:
                     continue
                 if status_key:
                     done.add(status_key)
-                self.jobs.log(job["id"], f"Drafting {index + 1} of {total}.", progress=10 + int(80 * index / max(total, 1)))
+                self.jobs.log(job["id"], f"Post {index + 1} of {total}.", progress=10 + int(80 * index / max(total, 1)))
                 stored_post = self.store.get_post(str(row.get("post_id") or "")) if row.get("post_id") else None
                 text = str((stored_post or {}).get("text") or "").strip()
                 handle = str((stored_post or {}).get("handle") or row.get("handle") or "")
@@ -845,14 +891,17 @@ class Service:
                 if not opened:
                     mark(str(row.get("external_id") or ""), {"status": "skipped", "reply": "Could not open this post."})
                     continue
+                if session.replies_blocked():
+                    mark(str(row.get("external_id") or ""), {"status": "skipped", "reply": "Only some accounts can reply."})
+                    self.jobs.log(job["id"], "Only some accounts can reply. Skipping.")
+                    continue
                 text = str(opened.get("text") or text).strip()
                 handle = str(opened.get("handle") or handle)
                 comments = [item for item in opened.get("comments") or [] if str(item.get("text") or "").strip()]
                 views = opened.get("views") if opened.get("views") is not None else row.get("views")
                 reply_total = engagement_count(opened.get("replies"), len(comments))
                 if len(text) < 12:
-                    mark(str(row.get("external_id") or ""), {"status": "skipped", "reply": "Too little text to reply to."})
-                    continue
+                    text = text or str(row.get("note") or "").strip() or name
                 own = str(product.get("x_handle") or self.settings.x_handle or "")
                 if replied_by(comments, own) or session.account_replied_here():
                     mark(str(row.get("external_id") or ""), {"status": "skipped", "reply": "This account already replied."})
@@ -879,18 +928,6 @@ class Service:
                 )
                 if stored_post is None:
                     continue
-                reason = reply_gate(
-                    views,
-                    reply_total,
-                    text,
-                    detail,
-                    likes=opened.get("likes"),
-                    reposts=opened.get("reposts"),
-                )
-                if reason:
-                    self.jobs.log(job["id"], reason)
-                    mark(str(row.get("external_id") or ""), {"status": "skipped", "reply": reason})
-                    continue
                 self.jobs.log(job["id"], f"Read {len(comments)} comments on a post with {views} views.")
                 self.jobs.log(job["id"], f"Writing a reply for @{handle or 'post'}.", progress=20 + int(70 * index / max(total, 1)))
                 recent = [
@@ -915,30 +952,53 @@ class Service:
                     8,
                 )
                 chat_url, fresh_chat = self._keep_chat(session, product, chat_url, fresh_chat)
-                skipped, reply = reply_outcome(raw)
-                if skipped:
-                    mark(str(row.get("external_id") or ""), {"status": "skipped", "reply": f"Skip: {skipped}"})
-                    self.jobs.log(job["id"], f"Skip: {skipped}")
-                    continue
-                problems = reply_problems(reply, name=name, url=url, post_text=text, facts=detail, recent=recent)
-                if problems:
+                reply, gif = _specific_reply(raw)
+                if not reply:
+                    self.jobs.log(job["id"], "The first answer was not a specific reply. Asking again.")
                     raw = self._complete(
                         session,
-                        rewrite_reply_prompt(" ".join(problems), name=name, url=url, post_text=text),
+                        force_reply_prompt(text, name=name, url=url),
                         _cancelled(job),
                         "" if fresh_chat else chat_url,
                         8,
                     )
                     chat_url, fresh_chat = self._keep_chat(session, product, chat_url, fresh_chat)
-                    skipped, reply = reply_outcome(raw)
-                    if skipped:
-                        mark(str(row.get("external_id") or ""), {"status": "skipped", "reply": f"Skip: {skipped}"})
-                        self.jobs.log(job["id"], f"Skip: {skipped}")
-                        continue
+                    reply, gif = _specific_reply(raw)
+                if reply:
+                    reply = ensure_product_link(reply, url, text)
                     problems = reply_problems(reply, name=name, url=url, post_text=text, facts=detail, recent=recent)
-                if problems:
-                    mark(str(row.get("external_id") or ""), {"status": "skipped", "reply": " ".join(problems)})
+                    if problems:
+                        raw = self._complete(
+                            session,
+                            rewrite_reply_prompt(" ".join(problems), name=name, url=url, post_text=text),
+                            _cancelled(job),
+                            "" if fresh_chat else chat_url,
+                            8,
+                        )
+                        chat_url, fresh_chat = self._keep_chat(session, product, chat_url, fresh_chat)
+                        rewritten, new_gif = _specific_reply(raw)
+                        if rewritten:
+                            reply = ensure_product_link(rewritten, url, text)
+                            gif = new_gif
+                if not reply:
+                    self.jobs.log(job["id"], "No specific reply. Leaving this post for another try.")
+                    mark(str(row.get("external_id") or ""), {"status": "skipped", "reply": "No specific reply yet."})
                     continue
+                if _cancelled(job)():
+                    break
+                status_url = str(row.get("url") or "")
+                self.jobs.log(job["id"], f"Posting the reply on @{handle or 'post'}.")
+                try:
+                    outcome = session.reply(status_url, reply, gif=gif, like=True)
+                except RuntimeError as exc:
+                    message = str(exc)
+                    self.jobs.log(job["id"], message[:180])
+                    if "signed out" in message.lower():
+                        raise
+                    if "can reply" in message.lower():
+                        mark(str(row.get("external_id") or ""), {"status": "skipped", "reply": "Only some accounts can reply."})
+                    continue
+                status = "published" if outcome == "published" else "uncertain"
                 comment = self.store.add_comment(
                     {
                         "id": str(uuid.uuid4()),
@@ -946,7 +1006,7 @@ class Service:
                         "text": reply,
                         "variant": "coming",
                         "version": 1,
-                        "status": "draft",
+                        "status": status,
                         "idempotency_key": None,
                         "created_at": _now(),
                         "updated_at": _now(),
@@ -954,13 +1014,13 @@ class Service:
                 )
                 mark(
                     str(row.get("external_id") or ""),
-                    {"status": "drafted", "reply": reply, "comment_id": comment["id"], "post_id": stored_post["id"]},
+                    {"status": status, "reply": reply, "gif": gif, "comment_id": comment["id"], "post_id": stored_post["id"]},
                 )
                 drafted += 1
-                scored = reply_quality(reply, name=name, url=url, post_text=text, facts=detail, recent=recent)
-                self.jobs.log(job["id"], f"Quality {scored['score']}. Draft saved for review. Nothing was posted.")
-        self.jobs.update(job["id"], message=f"Drafted {drafted} replies. Nothing was posted.", progress=100, results_count=drafted)
-        return {"drafted": drafted}
+                done.add(status_key)
+                self.jobs.log(job["id"], "Reply posted." if status == "published" else "The reply was not confirmed. It was not sent again.")
+        self.jobs.update(job["id"], message=f"Posted {drafted} replies.", progress=100, results_count=drafted)
+        return {"posted": drafted}
 
     def _post_drafts(
         self,
@@ -969,22 +1029,27 @@ class Service:
         product: dict[str, Any],
         *,
         pause_seconds: int = 120,
+        session: BrowserSession | None = None,
+        report: bool = True,
     ) -> dict[str, Any]:
-        """Send each drafted reply, then wait two minutes. A failed send stays drafted. This does not like the post."""
+        """Send each written reply. A failed send stays drafted. This does not like the post."""
+        if not rows:
+            return {"posted": 0, "missed": 0}
         product_id = str(product.get("id") or "")
         posted = 0
         missed = 0
+        wait = "Waiting 30 seconds before the next post." if pause_seconds <= 30 else "Waiting 2 minutes before the next reply."
 
         def mark(external_id: str, fields: dict[str, Any]) -> None:
             self.store.update_coming(external_id, fields, product_id or None)
 
-        with BrowserSession(self.settings) as session:
-            self._require_account(session, job, product)
+        def send(browser: BrowserSession) -> None:
+            nonlocal posted, missed
             total = len(rows)
             for index, row in enumerate(rows):
                 if _cancelled(job)():
                     break
-                if index > 0 and self._wait_between_replies(job, pause_seconds):
+                if index > 0 and self._pause(job, pause_seconds, wait):
                     break
                 external_id = str(row.get("external_id") or "")
                 text = str(row.get("reply") or "").strip()
@@ -992,7 +1057,7 @@ class Service:
                 self.jobs.log(job["id"], f"Posting {index + 1} of {total}.", progress=10 + int(80 * index / max(total, 1)))
                 mark(external_id, {"status": "posting"})
                 try:
-                    outcome = session.reply(url, text)
+                    outcome = browser.reply(url, text, gif=str(row.get("gif") or ""), like=True)
                 except RuntimeError as exc:
                     mark(external_id, {"status": "drafted", "reply": text})
                     self.jobs.log(job["id"], str(exc)[:180])
@@ -1007,22 +1072,19 @@ class Service:
                     self.store.update_comment(comment_id, {"status": status})
                 posted += 1
                 self.jobs.log(job["id"], "Reply posted." if status == "published" else "The reply was not confirmed. It was not sent again.")
-        message = f"Posted {posted} replies."
-        if missed:
-            message = f"{message} {missed} stayed as drafts."
-        self.jobs.update(job["id"], message=message, progress=100, results_count=posted)
-        return {"posted": posted, "missed": missed}
 
-    def _wait_between_replies(self, job: dict[str, Any], seconds: int) -> bool:
-        """True when the job was stopped during the two-minute break between replies."""
-        if seconds <= 0:
-            return False
-        self.jobs.log(job["id"], "Waiting 2 minutes before the next reply.")
-        for _ in range(seconds):
-            if _cancelled(job)():
-                return True
-            time.sleep(1)
-        return _cancelled(job)()
+        if session is None:
+            with BrowserSession(self.settings) as opened:
+                self._require_account(opened, job, product)
+                send(opened)
+        else:
+            send(session)
+        if report:
+            message = f"Posted {posted} replies."
+            if missed:
+                message = f"{message} {missed} stayed as drafts."
+            self.jobs.update(job["id"], message=message, progress=100, results_count=posted)
+        return {"posted": posted, "missed": missed}
 
     def _query(self, body: SearchIn) -> str:
         parts: list[str] = []

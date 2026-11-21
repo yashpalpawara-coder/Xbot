@@ -54,12 +54,12 @@ def more_message(count: int = 20) -> str:
     return f"{batch_count(count)} more"
 
 
-VIEW_MIN = 500
+VIEW_MIN = 400
 CREATOR_COUNT = 10
-QUERY_COUNT = 30
+QUERY_COUNT = 50
 POSTS_PER_QUERY = 5
-SEARCH_SCAN = 15
-QUERY_PAUSE_SECONDS = 30
+SEARCH_SCAN = 30
+QUERY_PAUSE_SECONDS = 60
 
 _FENCED = re.compile(r"```[^\n]*\n(.*?)```", re.S)
 _LINE_PREFIX = re.compile(r"^(?:[-*•]+|\d{1,3}[.)\]:-])\s*")

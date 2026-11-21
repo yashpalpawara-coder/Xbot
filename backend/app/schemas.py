@@ -75,6 +75,10 @@ class ProductSelectIn(BaseModel):
     id: str = Field(min_length=8, max_length=80)
 
 
+class ComingCountryIn(BaseModel):
+    country: str = Field(default="", max_length=80)
+
+
 class SettingsIn(BaseModel):
     product_name: str = Field(default="Ted", min_length=1, max_length=80)
     product_url: str = "https://tedcoachai.com"

@@ -90,7 +90,7 @@ export function SettingsScreen({ supabase }: { supabase: { ok: boolean; detail: 
         </label>
         <p className="text-sm text-[var(--muted)]">
           {settings.selected_product_name
-            ? `Saved for ${settings.selected_product_name}. Selecting that product signs out of the current X account and signs in with this login.`
+            ? `Saved for ${settings.selected_product_name}. Selecting that product opens X for 5 minutes so you can sign in. The saved login is used only if that account is still signed out.`
             : "Used when X is signed out."}
         </p>
         <label className="block"><span className="label">Product name</span>

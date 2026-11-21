@@ -17,8 +17,6 @@ export default function ComingPage() {
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const job = useJob(jobId);
-  const waiting = posts.filter((post) => (post.status || "saved") === "saved").length;
-  const ready = posts.filter((post) => (post.status === "drafted" || post.status === "posting") && (post.reply || "").trim()).length;
   const running = job?.status === "running";
   const countryCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -34,6 +32,9 @@ export default function ComingPage() {
   }, [posts]);
   const selectedCountry = countryCounts.some(([name]) => name === country) ? country : "All";
   const shown = selectedCountry === "All" ? posts : posts.filter((post) => (post.country?.trim() || "Unknown") === selectedCountry);
+  const waiting = shown.filter((post) => ["saved", "skipped"].includes(post.status || "saved")).length;
+  const ready = shown.filter((post) => (post.status === "drafted" || post.status === "posting") && (post.reply || "").trim()).length;
+  const canPost = waiting > 0 || ready > 0;
 
   async function load() {
     const [body, sessions] = await Promise.all([
@@ -47,6 +48,12 @@ export default function ComingPage() {
 
   useEffect(() => {
     void load().catch((exc: Error) => setError(exc.message));
+    void request<{ jobs: Job[] }>("/api/jobs")
+      .then((body) => {
+        const live = (body.jobs || []).find((item) => item.status === "running");
+        if (live) setJobId((current) => current || live.id);
+      })
+      .catch(() => undefined);
     function onProduct() {
       void load().catch((exc: Error) => setError(exc.message));
     }
@@ -76,26 +83,26 @@ export default function ComingPage() {
   async function start() {
     setError(null);
     try {
-      const started = await request<Job>("/api/coming/comment", { method: "POST" });
+      const started = await request<Job>("/api/coming/comment", {
+        method: "POST",
+        body: JSON.stringify({ country: selectedCountry === "All" ? "" : selectedCountry }),
+      });
       setJobId(started.id);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "Could not start comments.");
     }
   }
 
-  async function postDrafts() {
+  async function stop() {
     setError(null);
     try {
-      const started = await request<Job>("/api/coming/post", { method: "POST" });
-      setJobId(started.id);
+      const target = jobId || (await request<{ jobs: Job[] }>("/api/jobs")).jobs?.find((item) => item.status === "running")?.id;
+      if (!target) return;
+      setJobId(target);
+      await request(`/api/jobs/${target}/stop`, { method: "POST" });
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "Could not post the replies.");
+      setError(exc instanceof Error ? exc.message : "Could not stop.");
     }
-  }
-
-  async function stop() {
-    if (!jobId) return;
-    await request(`/api/jobs/${jobId}/stop`, { method: "POST" });
   }
 
   async function checkLogin() {
@@ -117,22 +124,19 @@ export default function ComingPage() {
       <section className="panel space-y-4 p-5">
         <p className="text-sm text-[var(--muted)]">
           {productName ? `${productName} has its own list. ` : ""}
-          {posts.length} saved. {waiting} still need a draft. {ready} drafted. Draft replies writes them, waits 30 seconds between posts, and does not post. Post replies sends every drafted reply from this list, without a separate approval, waits 2 minutes between replies, and does not like the post. A post needs more than 500 views, or more than 500 likes, replies, and reposts together.
+          {posts.length} saved. {waiting} still need a reply{selectedCountry === "All" ? "" : ` in ${selectedCountry}`}. Post replies writes one comment on every post, includes the product URL, likes the post, waits 30 seconds, then opens the next post. It does not save a draft.
         </p>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm text-[var(--muted)]">
-            X {session?.handle ? `@${session.handle.replace(/^@/, "")}` : session?.detail || "Not checked"}
+            X {session?.handle ? `@${session.handle.replace(/^@/, "")}` : session?.detail || "Not checked"}. X login opens the page for 5 minutes. The saved login runs only if you are still signed out.
           </p>
           <button className="btn-ghost" type="button" onClick={() => void checkLogin()} disabled={running}>
             {running && job?.type === "x_check" ? "Opening X…" : "X login"}
           </button>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button className="btn" type="button" onClick={() => void start()} disabled={waiting === 0 || running}>
-            {running && job?.type === "coming_comments" ? "Drafting replies…" : "Draft replies"}
-          </button>
-          <button className="btn" type="button" onClick={() => void postDrafts()} disabled={ready === 0 || running}>
-            {running && job?.type === "coming_post" ? "Posting replies…" : "Post replies"}
+          <button className="btn" type="button" onClick={() => void start()} disabled={!canPost || running}>
+            {running && job?.type === "coming_comments" ? "Posting replies…" : "Post replies"}
           </button>
           <button className="btn-danger" type="button" onClick={() => void stop()} disabled={!running}>
             Stop

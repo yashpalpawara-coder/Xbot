@@ -512,7 +512,7 @@ def test_post_replies_sends_drafts_without_approval(tmp_path, monkeypatch) -> No
         def use_x_account(self, username, password, handle, wait, notice):
             return SessionState("x", "signed_in", "ted", "Signed in.")
 
-        def reply(self, url, text):
+        def reply(self, url, text, gif="", like=False):
             sent.append((url, text))
             if url.endswith("/2"):
                 raise RuntimeError("X left the reply button disabled. Nothing was sent.")

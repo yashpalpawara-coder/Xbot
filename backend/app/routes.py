@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.browser_session import remote_click, remote_key, remote_screen, remote_type
 from app.errors import AppError
-from app.schemas import ApproveIn, CommentEdit, CommentGenerate, DailyApproveIn, DailyPostIn, GrokFindIn, ProductAnalyzeIn, ProductReviseIn, ProductSelectIn, ProductVerifyIn, PublishIn, SavedIn, SearchIn, SettingsIn
+from app.schemas import ApproveIn, ComingCountryIn, CommentEdit, CommentGenerate, DailyApproveIn, DailyPostIn, GrokFindIn, ProductAnalyzeIn, ProductReviseIn, ProductSelectIn, ProductVerifyIn, PublishIn, SavedIn, SearchIn, SettingsIn
 from app.state import get_state
 
 router = APIRouter(prefix="/api")
@@ -84,13 +84,15 @@ def start_grok_find(body: GrokFindIn | None = None) -> dict[str, object]:
 
 
 @router.post("/coming/comment")
-def start_coming_comments() -> dict[str, object]:
-    return get_state().service.start_coming_comments()
+def start_coming_comments(body: ComingCountryIn | None = None) -> dict[str, object]:
+    country = body.country if body is not None else ""
+    return get_state().service.start_coming_comments(country)
 
 
 @router.post("/coming/post")
-def post_drafts() -> dict[str, object]:
-    return get_state().service.start_post_drafts()
+def post_drafts(body: ComingCountryIn | None = None) -> dict[str, object]:
+    country = body.country if body is not None else ""
+    return get_state().service.start_post_drafts(country)
 
 
 @router.get("/finder/posts")

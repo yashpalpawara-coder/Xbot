@@ -209,6 +209,21 @@ def _chromium_ready(path: Path) -> bool:
     return any(path.glob("chromium-*/chrome-linux*/chrome"))
 
 
+_REPLY_BLOCKED = re.compile(
+    r"only some accounts can reply|"
+    r"who can reply|"
+    r"replies are limited|"
+    r"only verified accounts can reply|"
+    r"only (?:people|accounts)\b.{0,60}can reply",
+    re.I,
+)
+
+
+def reply_audience_blocked(text: str) -> bool:
+    """True for an X notice that this account is not allowed to reply."""
+    return bool(_REPLY_BLOCKED.search(text or ""))
+
+
 def running_on_server() -> bool:
     """Cloud Run sets K_SERVICE; Render sets RENDER=true."""
     return os.environ.get("RENDER") == "true" or bool(os.environ.get("K_SERVICE"))
@@ -373,44 +388,39 @@ class BrowserSession:
         wait: Callable[[], bool] | None = None,
         notice: Callable[[str], None] | None = None,
     ) -> SessionState:
-        """Sign out of whoever is open, then sign in as the product that was selected."""
+        """Open X and leave it for 5 minutes. The saved login is used only if that account is still signed out."""
         page = self.open_x()
-        logged_in = self.x_logged_in(page)
-        current = self.x_handle(page) if logged_in else ""
-        if logged_in and same_account(current, username, handle):
+        try:
+            page.bring_to_front()
+        except Exception:
+            pass
+        if self._x_matches(page, username, handle):
+            current = self.x_handle(page)
             message = f"Already signed in as @{current}."
             if notice:
                 notice(message)
             return SessionState("x", "signed_in", current, message)
-        if logged_in:
-            who = f"@{current}" if current else "the open account"
+        if not self._safe_x_logged_in(page):
+            page.goto("https://x.com/i/flow/login", wait_until="domcontentloaded", timeout=45_000)
+            try:
+                page.bring_to_front()
+            except Exception:
+                pass
+        if notice:
+            notice("The X login page is open. Sign in there. Automatic login starts in 5 minutes.")
+        if self._wait_until(
+            lambda: self._x_matches(page, username, handle),
+            wait,
+            300,
+            tick=lambda: self._sync_remote(page),
+        ):
+            current = self.x_handle(page)
+            message = f"Signed in as @{current}." if current else "Signed in to X."
             if notice:
-                notice(f"Signing out of {who}.")
-            self.sign_out_x(page)
-            page = self.open_x()
-            if self.x_logged_in(page):
-                still = self.x_handle(page)
-                if same_account(still, username, handle):
-                    message = f"Already signed in as @{still}."
-                    if notice:
-                        notice(message)
-                    return SessionState("x", "signed_in", still, message)
-                self._drop_x_cookies(page)
-                page.goto("https://x.com/i/flow/login", wait_until="domcontentloaded", timeout=45_000)
-                page = self.open_x()
-                if self.x_logged_in(page):
-                    still = self.x_handle(page)
-                    if same_account(still, username, handle):
-                        message = f"Already signed in as @{still}."
-                        if notice:
-                            notice(message)
-                        return SessionState("x", "signed_in", still, message)
-                    return SessionState(
-                        "x",
-                        "needs_manual",
-                        still or current,
-                        f"Could not sign out of {who}. Sign out in the Chrome window, then select the product again.",
-                    )
+                notice(message)
+            return SessionState("x", "signed_in", current, message)
+        if wait and wait():
+            return SessionState("x", "needs_manual", "", "Stopped before the X login finished.")
         if not str(username or "").strip() or not str(password or ""):
             return SessionState(
                 "x",
@@ -418,15 +428,56 @@ class BrowserSession:
                 "",
                 "This product has no X login. Add the username and password in Settings, then select it again.",
             )
-        label = str(handle or username).strip().lstrip("@")
-        if notice:
-            notice(f"Signing in as {label}.")
         self.settings.x_username = str(username).strip()
         self.settings.x_password = password
         self.settings.x_handle = str(handle or "").strip().lstrip("@") or (
             str(username).strip() if "@" not in str(username) else ""
         )
-        return self.ensure_x(wait, notice)
+        if self._safe_x_logged_in(page) and not self._x_matches(page, username, handle):
+            current = self.x_handle(page)
+            who = f"@{current}" if current else "the open account"
+            if notice:
+                notice(f"Signing out of {who}.")
+            self.sign_out_x(page)
+            page = self.open_x()
+            if self.x_logged_in(page) and not self._x_matches(page, username, handle):
+                self._drop_x_cookies(page)
+                page.goto("https://x.com/i/flow/login", wait_until="domcontentloaded", timeout=45_000)
+                page = self.open_x()
+                if self.x_logged_in(page) and not self._x_matches(page, username, handle):
+                    still = self.x_handle(page)
+                    return SessionState(
+                        "x",
+                        "needs_manual",
+                        still or current,
+                        f"Could not sign out of {who}. Sign out in the Chrome window, then select the product again.",
+                    )
+        if self._x_matches(page, username, handle):
+            current = self.x_handle(page)
+            message = f"Signed in as @{current}."
+            if notice:
+                notice(message)
+            return SessionState("x", "signed_in", current, message)
+        if notice:
+            notice("Signing in with the saved X login.")
+        if "/login" not in (page.url or "") and "/i/flow/login" not in (page.url or ""):
+            page.goto("https://x.com/i/flow/login", wait_until="domcontentloaded", timeout=45_000)
+        try:
+            self._submit_x_login(page, self.settings.x_username, self.settings.x_password)
+        except RuntimeError as exc:
+            return SessionState("x", "needs_manual", "", str(exc))
+        except PlaywrightTimeout:
+            return self._wait_x(page, wait, notice)
+        page.wait_for_timeout(2000)
+        if self._x_matches(page, username, handle):
+            current = self.x_handle(page)
+            return SessionState("x", "signed_in", current, f"Signed in as @{current}." if current else "Signed in to X.")
+        return self._wait_x(page, wait, notice)
+
+    def _x_matches(self, page: Page, username: str, handle: str) -> bool:
+        if not self._safe_x_logged_in(page):
+            return False
+        return same_account(self.x_handle(page), username, handle)
 
     def sign_out_x(self, page: Page) -> None:
         """Leave the account that is currently open in this Chrome profile."""
@@ -1337,8 +1388,14 @@ class BrowserSession:
             return None, []
         return posts[0], posts[1:7]
 
-    def reply(self, status_url: str, text: str) -> str:
+    def reply(self, status_url: str, text: str, gif: str = "", like: bool = False) -> str:
         """Send one reply. Returns published, uncertain, or raises before the click when nothing was sent."""
+        try:
+            return self._send_reply(status_url, text, gif=gif, like=like)
+        except PlaywrightTimeout as exc:
+            raise RuntimeError("X covered the Reply button, so this reply was not sent.") from exc
+
+    def _send_reply(self, status_url: str, text: str, gif: str = "", like: bool = False) -> str:
         page = self.open_x()
         if not self.x_logged_in(page):
             state = self.ensure_x()
@@ -1347,29 +1404,61 @@ class BrowserSession:
         page.goto(status_url, wait_until="domcontentloaded", timeout=45_000)
         page.wait_for_timeout(1200)
         if self._reply_visible(page, text):
+            if like:
+                self._like_open_post(page)
             return "published"
         if self._replies_limited(page):
-            raise RuntimeError("The author limits who can reply to this post.")
+            raise RuntimeError("Only some accounts can reply.")
         box = page.locator('[data-testid="tweetTextarea_0"]').first
         if not box.is_visible():
             opener = page.locator('article[data-testid="tweet"]').first.locator('[data-testid="reply"]')
             if opener.count() == 0:
                 raise RuntimeError("X did not show a reply button.")
-            opener.first.click()
+            self._click_covered(opener.first)
             box.wait_for(state="visible", timeout=15_000)
         box.fill(text)
+        if gif.strip():
+            self._attach_gif(page, gif)
         button = page.locator('[data-testid="tweetButtonInline"], [data-testid="tweetButton"]').first
         button.wait_for(state="visible", timeout=10_000)
         if button.is_disabled():
             raise RuntimeError("X left the reply button disabled. Nothing was sent.")
-        button.click()
+        self._dismiss_mask(page)
+        self._click_covered(button)
         try:
             page.get_by_text(text[:80], exact=False).first.wait_for(state="visible", timeout=15_000)
+            outcome = "published"
         except PlaywrightTimeout:
-            if self._reply_visible(page, text):
-                return "published"
-            return "uncertain"
-        return "published"
+            outcome = "published" if self._reply_visible(page, text) else "uncertain"
+        if like:
+            self._like_open_post(page)
+        return outcome
+
+    def _attach_gif(self, page: Page, query: str) -> bool:
+        """Attach one GIF from the reply composer. A miss still leaves the text ready to send."""
+        words = " ".join(query.split())[:40]
+        if not words:
+            return False
+        try:
+            button = page.locator('[data-testid="gifSearchButton"], button[aria-label="GIF"]').first
+            if button.count() == 0 or not button.is_visible():
+                return False
+            button.click()
+            search = page.locator('input[placeholder*="GIF" i], [data-testid="gifSearchInput"]').first
+            search.wait_for(state="visible", timeout=5_000)
+            search.fill(words)
+            page.wait_for_timeout(1200)
+            result = page.locator('[data-testid="gifSearchGifImage"]').first
+            result.wait_for(state="visible", timeout=6_000)
+            result.click()
+            return True
+        except Exception:
+            logging.getLogger(__name__).info("A GIF was not attached.")
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                return False
+            return False
 
     def drop_reply(self, status_url: str, text: str) -> str:
         """Post one reply on this status, then like that same post. Does not load the X home page."""
@@ -1387,19 +1476,20 @@ class BrowserSession:
             outcome = "published"
         else:
             if self._replies_limited(page):
-                raise RuntimeError("The author limits who can reply to this post.")
+                raise RuntimeError("Only some accounts can reply.")
             box = page.locator('[data-testid="tweetTextarea_0"]').first
             if not box.is_visible():
                 opener = page.locator('article[data-testid="tweet"]').first.locator('[data-testid="reply"]')
                 if opener.count() == 0:
                     raise RuntimeError("X did not show a reply button.")
-                opener.first.click()
+                self._click_covered(opener.first)
                 box.wait_for(state="visible", timeout=15_000)
             box.fill(text)
             button = page.locator('[data-testid="tweetButtonInline"], [data-testid="tweetButton"]').first
             button.wait_for(state="visible", timeout=10_000)
             if button.is_disabled():
                 raise RuntimeError("X left the reply button disabled. Nothing was sent.")
+            self._dismiss_mask(page)
             self._click_covered(button)
             try:
                 page.get_by_text(text[:80], exact=False).first.wait_for(state="visible", timeout=15_000)
@@ -1433,6 +1523,17 @@ class BrowserSession:
         """True when the signed-in account already has a reply under the open post."""
         page = self._page("x.com")
         return self._already_replied(page)
+
+    def _dismiss_mask(self, page: Page) -> None:
+        """Close the sheet X leaves over the Reply button. Escape can discard a typed reply, so this only lifts the mask."""
+        try:
+            page.evaluate(
+                """() => {
+                  for (const mask of document.querySelectorAll('[data-testid="mask"]')) mask.remove();
+                }"""
+            )
+        except Exception:
+            return
 
     def _click_covered(self, button) -> None:
         """Click even when X draws a mask over the button."""
@@ -1473,7 +1574,8 @@ class BrowserSession:
         button.wait_for(state="visible", timeout=10_000)
         if button.is_disabled():
             raise RuntimeError("X left the post button disabled. Nothing was posted.")
-        button.click()
+        self._dismiss_mask(page)
+        self._click_covered(button)
         try:
             box.wait_for(state="hidden", timeout=15_000)
         except PlaywrightTimeout:
@@ -1752,26 +1854,71 @@ class BrowserSession:
         try:
             found = page.evaluate(
                 """() => {
-                  const nodes = [...document.querySelectorAll('[class*="MarkdownRoot"], [data-message-author-role="assistant"]')];
                   const texts = [];
                   const seen = new Set();
+                  const add = (value) => {
+                    const text = String(value || '').trim();
+                    if (!text || seen.has(text)) return;
+                    seen.add(text);
+                    texts.push(text);
+                  };
+                  const turns = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
+                  const nodes = turns.length ? turns : [...document.querySelectorAll('[class*="MarkdownRoot"]')];
                   for (const node of nodes) {
                     const cls = String(node.className || '');
                     if (cls.includes('rich-text-user-turn')) continue;
                     if (node.closest('.rich-text-user-turn, [data-message-author-role="user"]')) continue;
-                    const text = (node.innerText || '').trim();
-                    if (!text || seen.has(text)) continue;
-                    seen.add(text);
-                    texts.push(text);
+                    const codes = [...node.querySelectorAll('pre, code')]
+                      .map((item) => (item.innerText || '').trim())
+                      .filter((item) => item && item.toLowerCase() !== 'plain text' && item.length >= 20);
+                    add(codes.length ? codes[codes.length - 1] : (node.innerText || '').trim());
+                  }
+                  for (const node of document.querySelectorAll('div, span')) {
+                    const own = [...node.childNodes].filter((child) => child.nodeType === 3).map((child) => child.textContent.trim()).join(' ');
+                    if (!/^plain text$/i.test(own)) continue;
+                    const card = node.parentElement && node.parentElement.parentElement;
+                    const code = card ? card.querySelector('code, pre') : null;
+                    const text = ((code && code.innerText) || (card && card.innerText) || '').replace(/^plain text\\s*/i, '').trim();
+                    add(text);
                   }
                   if (texts.length) return texts;
                   const body = document.body.innerText || '';
-                  return body.split('ChatGPT said:').slice(1).map((part) => part.split('ChatGPT can make mistakes')[0].trim()).filter(Boolean);
+                  return body.split('ChatGPT said:').slice(1).map((part) => part.split(/chatgpt\\b[\\s\\S]{0,80}can make mistakes/i)[0].trim()).filter(Boolean);
                 }"""
             )
         except PlaywrightTimeout:
             return []
         return [str(item).strip() for item in found or [] if str(item).strip()]
+
+    def _plain_reply(self, page: Page) -> str:
+        """The newest finished reply in a Plain text box."""
+        try:
+            text = page.evaluate(
+                r"""() => {
+                  const body = document.body ? document.body.innerText : '';
+                  const at = body.toLowerCase().lastIndexOf('plain text');
+                  if (at < 0) return '';
+                  const lines = body.slice(at + 'plain text'.length).split('\n');
+                  const kept = [];
+                  const stop = /^(copy|copied|share|good response|bad response|more actions|sources|search|latest response|response complete|check important info\.?|high|low|medium|extra high)$/i;
+                  const disclaimer = /chatgpt\b.{0,80}can make mistakes|can make mistakes/i;
+                  for (const raw of lines) {
+                    const line = raw.trim();
+                    if (!line) {
+                      if (kept.length) kept.push('');
+                      continue;
+                    }
+                    if (stop.test(line) || disclaimer.test(line)) break;
+                    kept.push(line);
+                    if (kept.join(' ').length > 600) break;
+                  }
+                  while (kept.length && !kept[kept.length - 1]) kept.pop();
+                  return kept.join('\n').trim();
+                }"""
+            )
+        except Exception:
+            return ""
+        return str(text or "").strip()
 
     def _read_answer(
         self,
@@ -1783,30 +1930,40 @@ class BrowserSession:
     ) -> str:
         known = {" ".join(item.split()) for item in before}
         known.add(" ".join(prompt.split()))
+        opening = " ".join(self._plain_reply(page).split())
         stable = ""
         stable_hits = 0
+        saw_busy = False
+        waited = 0
         while True:
             if cancelled and cancelled():
                 raise RuntimeError("Stopped while waiting for ChatGPT.")
+            plain = self._plain_reply(page)
+            plain_key = " ".join(plain.split())
             replies = [item for item in self._assistant_replies(page) if " ".join(item.split()) not in known]
             substantial = [
                 item
                 for item in replies
-                if len(item) >= 80 and not _TOOL_LINE.match(item.strip()) and not _STATUS_LINE.match(item.strip()) and not is_preamble(item)
+                if len(item) >= 40 and not _TOOL_LINE.match(item.strip()) and not _STATUS_LINE.match(item.strip()) and not is_preamble(item)
             ]
             current = substantial[-1] if substantial else ""
-            latest = replies[-1] if replies else ""
-            if _TOOL_LINE.match(latest.strip()) or _STATUS_LINE.match(latest.strip()):
-                latest = ""
-            tracked = current or latest
-            # A search chip after the writeup means ChatGPT is still working.
-            busy = self._chatgpt_busy(page) or bool(replies and current and replies[-1] != current)
-            if tracked and tracked == stable and not busy:
+            tracked = plain if len(plain_key) >= 20 else current
+            tracked_key = plain_key if len(plain_key) >= 20 else " ".join(tracked.split())
+            busy = self._chatgpt_busy(page)
+            if busy:
+                saw_busy = True
+            if tracked_key and tracked_key == stable and not busy:
                 stable_hits += 1
             else:
-                stable = tracked
+                stable = tracked_key
                 stable_hits = 0
-            if tracked and stable_hits >= max(1, settle) and not busy:
+            ready = max(3, min(int(settle), 8))
+            changed = bool(tracked_key) and tracked_key != opening
+            if tracked and stable_hits >= ready and not busy and (changed or saw_busy):
+                return tracked
+            waited += 1
+            # The reply is already in the Plain text box and ChatGPT never started another one.
+            if tracked and not busy and not saw_busy and stable_hits >= ready and waited >= 25 and tracked_key == opening:
                 return tracked
             page.wait_for_timeout(1000)
 
@@ -1830,16 +1987,13 @@ class BrowserSession:
                     return rect.width > 2 && rect.height > 2;
                   };
                   for (const button of document.querySelectorAll('button')) {
-                    const label = (button.getAttribute('aria-label') || '') + ' ' + (button.getAttribute('data-testid') || '');
-                    if (visible(button) && /stop/i.test(label)) return true;
+                    const label = ((button.getAttribute('aria-label') || '') + ' ' + (button.getAttribute('data-testid') || '')).toLowerCase();
+                    const generating = label.includes('stop generating') || label.includes('stop streaming') || label.includes('stop response') || label.includes('stop-button');
+                    if (visible(button) && generating) return true;
                   }
-                  if (document.querySelector('.result-streaming')) return true;
-                  const main = document.querySelector('main') || document.body;
-                  for (const node of main.querySelectorAll('span, div')) {
-                    if (node.childElementCount) continue;
-                    const text = (node.textContent || '').trim();
-                    if ((text === 'Thinking' || text === 'Searching') && visible(node)) return true;
-                  }
+                  const streaming = document.querySelector('.result-streaming');
+                  const stopButton = document.querySelector('button[data-testid="stop-button"]');
+                  if (streaming && stopButton && visible(stopButton)) return true;
                   return false;
                 }""",
                 timeout=3_000,
@@ -1849,7 +2003,7 @@ class BrowserSession:
             pass
         stop = page.locator(
             'button[data-testid="stop-button"], button[aria-label="Stop generating"], '
-            'button[aria-label="Stop streaming"], button[aria-label="Stop response"], button[aria-label="Stop"]'
+            'button[aria-label="Stop streaming"], button[aria-label="Stop response"]'
         )
         try:
             return stop.count() > 0 and stop.first.is_visible()
@@ -1865,13 +2019,17 @@ class BrowserSession:
         except PlaywrightTimeout:
             return False
 
+    def replies_blocked(self) -> bool:
+        """True when the open post says this account cannot reply."""
+        return self._replies_limited(self._page("x.com"))
+
     def _replies_limited(self, page: Page) -> bool:
         try:
             text = page.locator('[data-testid="primaryColumn"]').inner_text(timeout=3_000)
         except PlaywrightTimeout:
             return False
         lowered = text.lower()
-        return "who can reply" in lowered or "replies are limited" in lowered
+        return reply_audience_blocked(lowered)
 
     def _challenge_visible(self, page: Page) -> bool:
         code = page.locator('input[name="code"], input[autocomplete="one-time-code"]')

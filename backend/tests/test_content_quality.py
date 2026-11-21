@@ -49,7 +49,7 @@ def test_prompts_match_the_post_language_and_can_skip() -> None:
     )
     assert "same language" in message
     assert "same language" in studio
-    assert "SKIP:" in message
+    assert "There is no skip." in message
     assert "should_reply" in studio
     assert "three possible replies" not in studio
     drafted = original_post_prompt("VimVo", "https://example.com", "a missed walk")
@@ -76,8 +76,11 @@ def test_an_unsupported_feature_is_rejected() -> None:
     assert any("facts" in item for item in problems)
 
 
-def test_a_relevant_reply_without_a_pitch_is_kept() -> None:
-    reply = "If the step count is already in Apple Health, typing that walk in again is the part people drop."
+def test_a_direct_ask_needs_the_product_url() -> None:
+    bare = "If the step count is already in Apple Health, typing that walk in again is the part people drop."
+    problems = reply_problems(bare, name="VimVo", url="https://example.com", post_text=HEALTH, facts=FACTS)
+    assert any("URL" in item for item in problems)
+    reply = "If the steps are already in Apple Health, typing that walk again is the part people drop. VimVo marks the goal done from there. https://example.com"
     assert reply_problems(reply, name="VimVo", url="https://example.com", post_text=HEALTH, facts=FACTS) == []
 
 
@@ -146,7 +149,7 @@ def test_generic_motivation_scores_zero_even_when_it_sounds_fluent() -> None:
     assert any("generic" in item for item in problems)
     assert scored["score"] == 0
     assert scored["skipped"] is True
-    specific = "Monday-you keeps writing a plan that Thursday-you cannot finish, so Thursday needs a 5-minute version of the routine instead."
+    specific = "Monday-you writes a plan Thursday-you can't finish, so it needs a 5-minute version."
     assert reply_problems(specific, name="VimVo", url="https://example.com", post_text=MONDAY, facts=FACTS) == []
     kept = reply_quality(specific, name="VimVo", url="https://example.com", post_text=MONDAY, facts=FACTS)
     assert kept["skipped"] is False
@@ -154,14 +157,14 @@ def test_generic_motivation_scores_zero_even_when_it_sounds_fluent() -> None:
 
 
 def test_a_repeated_generic_reply_is_rejected() -> None:
-    advice = "Monday-you keeps writing a plan that Thursday-you cannot finish, so Thursday needs a 5-minute version of the routine instead."
+    advice = "Monday-you writes a plan Thursday-you can't finish, so it needs a 5-minute version."
     problems = reply_problems(advice, name="VimVo", url="https://example.com", post_text=MONDAY, facts=FACTS, recent=[advice])
     assert any("repeats" in item for item in problems)
     assert reply_quality(advice, name="VimVo", url="https://example.com", post_text=MONDAY, facts=FACTS, recent=[advice])["score"] == 0
 
 
 def test_a_supported_product_answer_is_kept() -> None:
-    reply = "Having to tick off a walk your phone already recorded is pretty redundant. VimVo supports automatic completion of eligible step and workout goals through Apple Health."
+    reply = "Typing a walk Apple Health already recorded is the redundant part. VimVo can mark that step goal done. https://example.com"
     assert reply_problems(reply, name="VimVo", url="https://example.com", post_text=HEALTH, facts=FACTS) == []
     scored = reply_quality(reply, name="VimVo", url="https://example.com", post_text=HEALTH, facts=FACTS)
     assert scored["skipped"] is False

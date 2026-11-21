@@ -127,15 +127,23 @@ class JobManager:
     def stop(self, job_id: str) -> dict[str, Any]:
         with self._guard:
             job = self._jobs.get(job_id)
+            if job is None or job.get("status") != "running":
+                live = self._jobs.get(self._running_id)
+                if live is not None and live.get("status") == "running":
+                    job = live
             if job is None:
                 stored = self.store.get_job(job_id)
                 if stored is None:
                     raise AppError("Job not found.", 404, "not_found")
-                return stored
-            job["cancel"].set()
-            job["message"] = "Stopping"
-            job["updated_at"] = _now()
-            snapshot = self.public(job)
+                stored["status"] = "stopped"
+                stored["message"] = "Stopped"
+                stored["updated_at"] = _now()
+                snapshot = stored
+            else:
+                job["cancel"].set()
+                job["message"] = "Stopping"
+                job["updated_at"] = _now()
+                snapshot = self.public(job)
         try:
             self.store.upsert_job(snapshot)
         except Exception:
